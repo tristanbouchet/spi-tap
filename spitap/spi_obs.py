@@ -29,7 +29,7 @@ from astropy.coordinates import SkyCoord
 import astropy.units as u
 from astropy.io import fits
 
-from spibackground.obs_background import ScwTracerDB, ObsBkg, LiveTimeRev
+from .obs_background import ScwTracerDB, ObsBkg, LiveTimeRev
 
 
 class ObsSPI:
@@ -37,7 +37,7 @@ class ObsSPI:
     
     EVT_BIN_SIZE = {'SE':.5, 'PSD':.5, 'HE':1.}
     
-    def __init__(self, main_dir, initial_dir=None, config_file='config.txt',
+    def __init__(self, main_dir, initial_dir='.', config_file='config.txt',
                  gnrl_cat_ext = 'GNRL-REFR-CAT', bg_idx_filename = 'output_bgmodel_conti_sep_idx.fits.gz',
                  spiselect_par_tpl_file = 'spiselectscw.template.par', spimodfit_par_tpl_file='spimodfit.template.par',
                  testrun=False):
@@ -77,9 +77,10 @@ class ObsSPI:
         self.gnrl_cat_path = None
         self.spi_cat_path = None
         self.all_revs_path = None
-        self.templates_dir = None
         self.bkg_db_dir = None
         self.import_path_config(config_file)
+        # TO DO: need to figure out a better way to access template files...
+        self.templates_dir = f'{initial_dir}/templates_par'
         # default file names
         self.gnrl_cat_ext =  gnrl_cat_ext
         self.bg_idx_filename = bg_idx_filename
@@ -120,6 +121,7 @@ class ObsSPI:
         """use the config file to set path attributes
         this allows user to change paths without changing this code
         """
+        print('Loading config paths...')
         with open(f'{self.main_dir}/{config_file}', 'r') as f_conf:
             for line in f_conf:
                 line = line.strip()
@@ -133,7 +135,7 @@ class ObsSPI:
                     value = value.strip()
                     # Set as attribute
                     setattr(self, variable_name, value)
-                    print(f'Loaded config: {variable_name} = {value}')
+                    print(f'{variable_name} = {value}')
             
 
     ########## Query tools ##########
@@ -819,49 +821,3 @@ background_var_coef_02,s,h,"{bkg_var_n} {bkg_var_unit} {bkg_var_type}",,,"Time v
     def generate_response(self):
         pass
 
-# def main():
-if __name__ == '__main__':
-
-    """Main pipeline execution with user interaction"""
-
-    initial_dir= os.getcwd()
-    print('*** SPI Observation Pipeline ***\n')
-    
-    obs = ObsSPI(
-        # those paths should be changed:
-        main_dir = initial_dir+'/obs',
-        # main_dir = '/home/tbouchet/SPI_SOURCES/obs',
-        initial_dir=initial_dir,
-        testrun=False
-        )
-    
-    print(f'Main observation directory is {obs.main_dir}\n')
-
-    print('Tip: default values can be selected by simply pressing enter.\n')
-    print('\n=== Source Selection ===\n')
-    obs.setup_source_interactive()
-    
-    print('\n=== Observation Selection ===\n')
-    obs.select_observations_interactive()
-    
-    print('\n=== Energy Binning ===\n')
-    obs.setup_energies_interactive()
-    
-    print('\n=== Prepare data set with spiselectscw ===\n')
-    obs.make_spiselectscw_par_interactive()
-    
-    print('\n=== Background Processing ===\n')
-    obs.process_background()
-    
-    print('\n=== Flux extraction (spimodfit) ===\n')
-    obs.make_spimodfit_par_interactive()
-
-    print('\n=== Response matrix generation (spirmfgen) ===\n')
-    obs.generate_response()
-    # print('\n*** Pipeline completed ***\n')
-
-    # back to original place
-    os.chdir(initial_dir)
-
-# if __name__ == '__main__':
-#     main()
