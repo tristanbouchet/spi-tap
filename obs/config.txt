@@ -1,0 +1,7 @@
+spi_cat_path, '/home/tbouchet/cat/spi_cat_2023.fits'
+gnrl_cat_path, '/home/tbouchet/cat/nrt_cat_tristan.fits'
+scw_db_path, '/home/tbouchet/ScwDB_0016-2887_reduced_filterGTI.fits.gz'
+data_dir, '/mnt/kiwi/INTEGRAL/Private_low'
+all_revs_path, '/data1/ipp_afs_mirror/integral/shared_analysis/cookbook/revolutions/all_revs.fits'
+templates_dir, './templates_par'
+bkg_db_dir, '/home/tbouchet/BKG_DB'

@@ -1,6 +1,7 @@
 """
-Runs the entire SPI pipeline for a point source.
-Can be called directly (main) for interactive session, or imported for automatized analysis. 
+SPI-TAP — SPI Transient Analysis Pipeline
+Runs the entire SPI pipeline for a point source, given dates, energy bins and source variability.
+Can be called directly for quick interactive session, or imported for automatized analysis. 
 
 Main analysis steps:
 - select data with dates, position and angle
@@ -11,10 +12,6 @@ Main analysis steps:
 - run model fitting with spimodfit
 - create source spectra with response)
 
-Possible name for pipeline:
-SPI-TAP — SPI Transient Analysis Pipeline
-SPARTA — SPI Automated Rapid Target Analysis
-SPIT(A) - SPI Transient (Analysis)
 """
 
 import pandas as pd
@@ -40,7 +37,7 @@ class ObsSPI:
     
     EVT_BIN_SIZE = {'SE':.5, 'PSD':.5, 'HE':1.}
     
-    def __init__(self, main_dir, data_dir, scw_db_path, gnrl_cat_path, spi_cat_path, all_revs_path, templates_dir, bkg_db_dir, initial_dir=None,
+    def __init__(self, main_dir, initial_dir=None, config_file='config.txt',
                  gnrl_cat_ext = 'GNRL-REFR-CAT', bg_idx_filename = 'output_bgmodel_conti_sep_idx.fits.gz',
                  spiselect_par_tpl_file = 'spiselectscw.template.par', spimodfit_par_tpl_file='spimodfit.template.par',
                  testrun=False):
@@ -74,14 +71,15 @@ class ObsSPI:
 
         # Path and directories
         self.main_dir = main_dir
-        self.data_dir = data_dir
-        self.scw_db_path = scw_db_path
-        self.gnrl_cat_path = gnrl_cat_path
-        self.spi_cat_path = spi_cat_path
-        self.all_revs_path = all_revs_path
-        self.templates_dir = templates_dir
-        self.bkg_db_dir = bkg_db_dir
         self.initial_dir = initial_dir
+        self.data_dir = None
+        self.scw_db_path = None
+        self.gnrl_cat_path = None
+        self.spi_cat_path = None
+        self.all_revs_path = None
+        self.templates_dir = None
+        self.bkg_db_dir = None
+        self.import_path_config(config_file)
         # default file names
         self.gnrl_cat_ext =  gnrl_cat_ext
         self.bg_idx_filename = bg_idx_filename
@@ -117,6 +115,26 @@ class ObsSPI:
 
         # if recorded, last query values used as defaults
         self.import_last_query()
+    
+    def import_path_config(self, config_file='config.txt'):
+        """use the config file to set path attributes
+        this allows user to change paths without changing this code
+        """
+        with open(f'{self.main_dir}/{config_file}', 'r') as f_conf:
+            for line in f_conf:
+                line = line.strip()
+                # Skip empty lines and comments
+                if not line or line.startswith('#'):
+                    continue
+                # Parse variable_name, value
+                if ',' in line:
+                    variable_name, value = line.split(',', 1)
+                    variable_name = variable_name.strip()
+                    value = value.strip()
+                    # Set as attribute
+                    setattr(self, variable_name, value)
+                    print(f'Loaded config: {variable_name} = {value}')
+            
 
     ########## Query tools ##########
 
@@ -797,6 +815,9 @@ background_var_coef_02,s,h,"{bkg_var_n} {bkg_var_unit} {bkg_var_type}",,,"Time v
                            bkg_var_n=bkg_var_n, bkg_var_unit=bkg_var_unit, bkg_var_type=bkg_var_type
                            )
     
+    ########## Response generation (spirmfgen) ##########
+    def generate_response(self):
+        pass
 
 # def main():
 if __name__ == '__main__':
@@ -807,14 +828,9 @@ if __name__ == '__main__':
     print('*** SPI Observation Pipeline ***\n')
     
     obs = ObsSPI(
-        main_dir = '/home/tbouchet/SPI_SOURCES/obs',
-        data_dir = '/mnt/kiwi/INTEGRAL/Private_low',
-        scw_db_path = '/home/tbouchet/ScwDB_0016-2887_reduced_filterGTI.fits.gz',
-        gnrl_cat_path = '/home/tbouchet/cat/nrt_cat_tristan.fits',
-        spi_cat_path = '/home/tbouchet/cat/spi_cat_2023.fits',
-        all_revs_path= '/data1/ipp_afs_mirror/integral/shared_analysis/cookbook/revolutions/all_revs.fits',
-        templates_dir = '/home/tbouchet/templates_par',
-        bkg_db_dir = '/home/tbouchet/BKG_DB',
+        # those paths should be changed:
+        main_dir = initial_dir+'/obs',
+        # main_dir = '/home/tbouchet/SPI_SOURCES/obs',
         initial_dir=initial_dir,
         testrun=False
         )
@@ -840,6 +856,8 @@ if __name__ == '__main__':
     print('\n=== Flux extraction (spimodfit) ===\n')
     obs.make_spimodfit_par_interactive()
 
+    print('\n=== Response matrix generation (spirmfgen) ===\n')
+    obs.generate_response()
     # print('\n*** Pipeline completed ***\n')
 
     # back to original place
