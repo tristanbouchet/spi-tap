@@ -1,10 +1,12 @@
 SPI-TAP — SPI Transient Analysis Pipeline
+
 Runs the entire SPI pipeline for a point source, given dates, energy bins and source variability.
 Can be called directly for quick interactive session, or imported for automatized analysis. 
 
 # Requirements
 
 The pipeline requires the following libraries:
+
 numpy scipy pandas astropy ipython
 
 # Main analysis steps
@@ -21,8 +23,8 @@ First, install the required libraries, preferentially in a clean conda environme
 
 ```console
 conda init
-conda create -n "spi" python=3.13
-conda activate spi
+conda create -n "spitap" python=3.13
+conda activate spitap
 conda install ipython numpy scipy pandas astropy
 ```
 
@@ -70,4 +72,11 @@ For automatized analysis, you can import spi-tap into your own script or jupyter
 import spitap
 ```
 
-(See the notebook for a detailed example)
+# Spectra analysis
+
+After running the pipeline for a source, they can be copied locally and analyzed there (using e.g. XSpec). Otherwise, a jupyter notebook is provided which shows an exemple of spectral analysis using the 3ML library. To install it, unset some env variables and use pip:
+
+```console
+unsetenv HEADAS PFILES LHEASOFT
+pip install astromodels threeml
+```

@@ -20,6 +20,7 @@ import sys
 import os
 import subprocess
 import shutil
+import time
 import glob
 import pickle
 import socket
@@ -31,15 +32,23 @@ from astropy.io import fits
 
 from .obs_background import ScwTracerDB, ObsBkg, LiveTimeRev
 
+RED = "\033[31m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+BLUE = "\033[34m"
+WHITE = "\033[37m"
+RESET = "\033[0m"
+BOLD = "\033[1m"
 
 class ObsSPI:
     """Pipeline for SPI observation analysis"""
     
     EVT_BIN_SIZE = {'SE':.5, 'PSD':.5, 'HE':1.}
     
-    def __init__(self, main_dir, initial_dir='.', config_file='config.txt',
+    def __init__(self, main_dir, initial_dir='.', initial_env=None, config_file='config.txt',
                  gnrl_cat_ext = 'GNRL-REFR-CAT', bg_idx_filename = 'output_bgmodel_conti_sep_idx.fits.gz',
                  spiselect_par_tpl_file = 'spiselectscw.template.par', spimodfit_par_tpl_file='spimodfit.template.par',
+                 spimodfit_result_file = 'results.spimodfit.fits',
                  testrun=False):
         
         # Run attributes
@@ -72,6 +81,7 @@ class ObsSPI:
         # Path and directories
         self.main_dir = main_dir
         self.initial_dir = initial_dir
+        self.initial_env = initial_env
         self.data_dir = None
         self.scw_db_path = None
         self.gnrl_cat_path = None
@@ -86,6 +96,7 @@ class ObsSPI:
         self.bg_idx_filename = bg_idx_filename
         self.spiselect_par_tpl_file =  spiselect_par_tpl_file
         self.spimodfit_par_tpl_file = spimodfit_par_tpl_file
+        self.spimodfit_result_file = spimodfit_result_file
         
         self.scw_tracer_db = ScwTracerDB(self.scw_db_path)
         self.obs_bkg = None
@@ -215,6 +226,77 @@ class ObsSPI:
             print(f'Directory {dir_name} successfully created.')
         return write_dir
     
+    def run_spi_cmd(self, CMD, logfile = 'spiselectscw.log', isolate_env=True):
+        """run a command outside python within its own isolated env
+        used for: spiselectscw, spimodfit, rmfgen
+        """
+        if isolate_env:
+            if self.initial_env is not None:
+                cmd_env = self.initial_env.copy()
+            else:
+                cmd_env = os.environ.copy()
+        else:
+            cmd_env = None
+
+        try:
+            with open(logfile, 'w') as log:
+                log.write(f"{socket.gethostname()} {datetime.now()}\n")
+                log.write(f"Command: {CMD}\n")
+                log.flush()
+                
+                process = subprocess.Popen(CMD, stdout=log, stderr=subprocess.STDOUT, text=True,
+                                           env=cmd_env)
+                # show cycling dots to indicate the command is running
+                n_dots= 4
+                dot_frames = ['.'*i for i in range(1,n_dots+1)]
+                i = 0
+                while process.poll() is None:
+                    print(f'\rRunning command{dot_frames[i % n_dots]}', end='', flush=True)
+                    i += 1
+                    time.sleep(0.5)
+                print('\r   \r', end='', flush=True)
+                
+                log.write(f"\n{socket.gethostname()} {datetime.now()}\n")
+            
+            print(f"Command completed with exit status: {process.returncode}")
+            print(f"Output logged to {logfile}")
+            return process.returncode
+        
+        except Exception as e:
+            print(f"Error running command: {e}")
+            return False
+    
+    # def run_spi_cmd(self, CMD, logfile = 'spiselectscw.log', isolate_env=True):
+    #     """run a command outside python within its own isolated env
+    #     used for: spiselectscw, spimodfit, rmfgen
+    #     """
+    #     if isolate_env:
+    #         if self.initial_env is not None:
+    #             cmd_env = self.initial_env.copy()
+    #         else:
+    #             cmd_env = os.environ.copy()
+    #     else:
+    #         cmd_env = None
+
+    #     try:
+    #         with open(logfile, 'w') as log:
+    #             log.write(f"{socket.gethostname()} {datetime.now()}\n")
+    #             log.write(f"Command: {CMD}\n")
+    #             log.flush()
+                
+    #             result = subprocess.run(CMD, stdout=log, stderr=subprocess.STDOUT, text=True,
+    #                                     env=cmd_env)
+                
+    #             log.write(f"\n{socket.gethostname()} {datetime.now()}\n")
+            
+    #         print(f"Command completed with exit status: {result.returncode}")
+    #         print(f"Output logged to {logfile}")
+    #         return result.returncode
+        
+    #     except Exception as e:
+    #         print(f"Error running command: {e}")
+    #         return False
+        
     ########## Source ##########
 
     def setup_source(self, src_dir, full_name=None, ra=None, dec=None):
@@ -481,14 +563,13 @@ class ObsSPI:
         """Execute the spiselectscw command following the submit-spiselectscw.sh script."""
         
         CMD = "/data1/ipp_afs_mirror/integral/software/local/spiselectscw/4.02/amd64_sles11_g++/spiselectscw"
-        CFITSIO_TEMPLATES = "/data1/ipp_afs_mirror/integral/software/osa/osa-10.0/linux64_sw-10.0/templates"
         parfile_path = f'spiselectscw.{run_id}.par'
         
         if not os.path.isfile(parfile_path):
             print(f"Parameter file {parfile_path} doesn't exist. Exit!")
             return False
         
-        os.environ['CFITSIO_INCLUDE_FILES'] = CFITSIO_TEMPLATES
+        os.environ['CFITSIO_INCLUDE_FILES'] = self.cfitsio_templates_dir
         os.environ['PFILES'] = '.'
         
         if not os.path.isdir(run_id):
@@ -525,25 +606,11 @@ class ObsSPI:
         if create_scw_file == 0 and scw_file and not os.path.isfile(scw_file):
             os.symlink('../scw.fits', 'scw.fits')
         
-        logfile = 'spiselectscw.log'
-        print(f"Running spiselectscw (RUN_ID: {run_id})...")
+        print(f"Launching spiselectscw (RUN_ID: {run_id})...")
+        err_code = self.run_spi_cmd(CMD, isolate_env=False)
+        return err_code
         
-        try:
-            with open(logfile, 'w') as log:
-                log.write(f"{datetime.now()}\n")
-                log.flush()
-                
-                result = subprocess.run(CMD, stdout=log, stderr=subprocess.STDOUT, text=True)
-                
-                log.write(f"\n{datetime.now()}\n")
-            
-            print(f"Command completed with exit status: {result.returncode}")
-            print(f"Output logged to {logfile}")
-            return result.returncode
-            
-        except Exception as e:
-            print(f"Error running command: {e}")
-            return False
+        
 
     def make_spiselectscw_par(self, skip_spalready_exists=False):
         """create spiselectscw parameter file"""
@@ -602,6 +669,8 @@ out_expo_map_dol,s,h,"expo.fits",,,"Name of the output exposure map. None if lef
                 print(f'Check log file {os.getcwd()}/spiselectscw.log')
                 os.chdir(self.initial_dir)
                 raise AssertionError()
+        else:
+            os.chdir(self.ener_dir)
     
     
     def make_spiselectscw_par_interactive(self):
@@ -643,7 +712,6 @@ out_expo_map_dol,s,h,"expo.fits",,,"Name of the output exposure map. None if lef
         """
         
         CMD = "/data1/ipp_afs_mirror/integral/software/local/spimodfit/3.2/amd64_sles11_g++/spimodfit"
-        CFITSIO_TEMPLATES = "/data1/ipp_afs_mirror/integral/software/osa/osa-10.0/linux64_sw-10.0/templates"
         parfile_path = f'spimodfit.{run_id}.par'
         
         if not os.path.isfile(parfile_path):
@@ -664,30 +732,15 @@ out_expo_map_dol,s,h,"expo.fits",,,"Name of the output exposure map. None if lef
         
         shutil.copy2(f'../{parfile_path}', 'spimodfit.par')
         
-        os.environ['CFITSIO_INCLUDE_FILES'] = CFITSIO_TEMPLATES
+        os.environ['CFITSIO_INCLUDE_FILES'] = self.cfitsio_templates_dir
         os.environ['PFILES'] = '.'
         
-        logfile = 'spimodfit.log'
-        print(f"Running spimodfit (RUN_ID: {run_id})...")
-        
-        try:
-            with open(logfile, 'w') as log:
-                log.write(f"{socket.gethostname()} {datetime.now()}\n")
-                log.write(f"Command: {CMD}\n")
-                log.flush()
-                
-                result = subprocess.run(CMD, stdout=log, stderr=subprocess.STDOUT, text=True)
-                
-                log.write(f"\n{socket.gethostname()} {datetime.now()}\n")
-            
-            print(f"Command completed with exit status: {result.returncode}")
-            print(f"Output logged to {logfile}")
-            return result.returncode
-            
-        except Exception as e:
-            print(f"Error running command: {e}")
-            return False
+        print(f"Launching spimodfit (RUN_ID: {run_id})...")
+        err_code = self.run_spi_cmd(CMD, logfile='spimodfit.log', isolate_env=False)
 
+        self.spec_path = f'{self.main_dir}/{self.src_dir}/{self.date_dir}/{self.ener_dir}/{self.fit_dir}'
+        return err_code
+        
     
     def make_spimodfit_par(self, src_var_n=0, src_var_unit='d', src_var_type='n', src_max_angle=20.,
                            bkg_var_n=1, bkg_var_unit='d', bkg_var_type='i',
@@ -734,7 +787,7 @@ source_parameters_fit,i,h,1,0,1,"Sources fit parameter 1=yes"
             
             # Source variability parameter
 
-            if src_var_unit == 'rev':
+            if src_var_unit == 'r':
 
                 spimodfit_par_str += f"""
 source_var_coef,s,h,"{src_var_n} {src_var_unit} {src_var_type}",,,"Time variability definition : d(ays)/p(pointings) + i(ncrements)/n(nodes")
@@ -754,7 +807,7 @@ sources_zenith_angle,r,h,{src_max_angle},0,," Sources maximum zenithal angle"
 # ----------- background variability parameters -----------
 collect_background_models,i,h,0,0,1,"Collect background components into one model (0/1)"
 """
-            if bkg_var_unit=='rev':
+            if bkg_var_unit=='r':
                 spimodfit_par_str += f"""
 # OPTION 1a: FIT BACKGROUND ONCE PER REVOLUTION AND DETECTOR FAILURE
 # CAN ALSO REPLACE all_revs.fits WITH EVERY N REVOLUTIONS WHERE N=0.003125 TO 30
@@ -803,13 +856,13 @@ background_var_coef_02,s,h,"{bkg_var_n} {bkg_var_unit} {bkg_var_type}",,,"Time v
 
         else:
             src_max_angle = self.query('Max off-angle for catalog sources selection', default_key='src_max_angle')
-            print('* Source variability: Time variability definition : number + rev(olution)/d(ays)/p(pointings) + i(ncrements)/n(nodes)')
-            src_var_unit = self.query('Variability unit? (p=pointing, d=day, rev=revolution)', default_key='src_var_unit')
+            print('* Source variability: Time variability definition')
+            src_var_unit = self.query('Variability unit? (p=pointing, d=day, r=revolution)', default_key='src_var_unit')
             src_var_n = self.query('Variability number? (0 or odd)', default_key='src_var_n')
             src_var_type = self.query('Variability type? (i(ncrements)/n(nodes))', default_key='src_var_type')
 
-            print('* Background variability: Time variability definition : d(ays)/p(pointings) + i(ncrements)/n(nodes)')
-            bkg_var_unit = self.query('Variability unit? (p=pointing, d=day, rev=revolution)', default_key='bkg_var_unit')
+            print('* Background variability: Time variability definition')
+            bkg_var_unit = self.query('Variability unit? (p=pointing, d=day, r=revolution)', default_key='bkg_var_unit')
             bkg_var_n = self.query('Variability number? (>=0)', default_key='bkg_var_n')
             bkg_var_type = self.query('Variability type? (i(ncrements)/n(nodes))', default_key='bkg_var_type')
 
@@ -817,7 +870,88 @@ background_var_coef_02,s,h,"{bkg_var_n} {bkg_var_unit} {bkg_var_type}",,,"Time v
                            bkg_var_n=bkg_var_n, bkg_var_unit=bkg_var_unit, bkg_var_type=bkg_var_type
                            )
     
+    def analyze_spimodfit(self, chi2_threshold = .4, verbose=True):
+        with open('spimodfit.log', 'r') as f_fit:
+            spimodfit_log = f_fit.readlines()
+            pearson_chi2_log = [l.split('=')[-1] for l in spimodfit_log if "Corresponding Pearson's chi2 stat / dof" in l]
+            pearson_chi2_list = np.array([float(p.split('/dof')[0]) for p in pearson_chi2_log])
+            count_chi2_threshold = (np.abs(pearson_chi2_list - 1) > chi2_threshold).sum()
+            if verbose:
+                print(f"Pearson's chi2 stat / dof for each energy bin")
+                for i in range(len(pearson_chi2_list)):
+                    if np.abs(pearson_chi2_list[i] - 1) > chi2_threshold:
+                        print(f'{BOLD}{RED}{self.e_channels[i]} - {self.e_channels[i+1]} : {pearson_chi2_list[i]:.2f}{RESET}')
+                    else:
+                        print(f'{self.e_channels[i]} - {self.e_channels[i+1]} : {pearson_chi2_list[i]:.2f}')
+            if count_chi2_threshold > 0:
+                print(f'Warning! {count_chi2_threshold} energy bins have a chi2 above the set threshold. Re-running spimodfit or ignoring these channels is recommanded.')
+
+
+            
     ########## Response generation (spirmfgen) ##########
-    def generate_response(self):
-        pass
+
+    def generate_response(self, clobber='n'):
+        """Generate response matrix using spirmf command"""
+        
+        outRMFfile = "rmf_spi"
+        
+        # Create symbolic links to templates
+        print("Creating symbolic links to templates...")
+        try:
+            for tpl_file in os.listdir(self.cfitsio_templates_dir):
+                if tpl_file.endswith('.tpl'):
+                    src = os.path.join(self.cfitsio_templates_dir, tpl_file)
+                    dst = os.path.join('.', tpl_file)
+                    if os.path.exists(dst):
+                        os.remove(dst)
+                    os.symlink(src, dst)
+        except Exception as e:
+            print(f"Warning: Could not create template symlinks: {e}")
+        
+        print(f"Launching spirmf to generate response matrix...")
+        CMD = [
+                    f"{self.rmfgen_path}/spirmf",
+                    f"rw-grp-dol={self.inRMFfile}[GROUPING]",
+                    f"ebounds-dol={self.spimodfit_result_file}[SPI.-EBDS-SET]",
+                    f"outfile={outRMFfile}",
+                    "single=y", "update=n", "phafile=", f"clobber={clobber}", "chatter=2"
+                ]
+        
+        err_code = self.run_spi_cmd(CMD, logfile='spirmf.log')
+        
+        # Clean up template files
+        print("Cleaning up template files...")
+        for tpl_file in os.listdir('.'):
+            if tpl_file.endswith('.tpl'):
+                try:
+                    os.remove(tpl_file)
+                except OSError:
+                    pass
+
+        if err_code == 0:
+            self.add_rmf_keywords(outRMFfile=outRMFfile)
+
+        return err_code
+    
+    def add_rmf_keywords(self, outRMFfile='rmf_spi'):
+        '''add the RMF name to the RESPFILE keyword
+        this allows XSpec to load RMF automatically
+        '''
+        print('Adding SPE keyword to rmf.fits ...')
+        with fits.open(f"{outRMFfile}.rmf.fits", mode="update", memmap=True) as hdul:
+            hdul["GROUPING"].header["ISDCLEVL"] = "SPE"
+            hdul["SPI.-RMF.-RSP"].header["ISDCLEVL"] = "SPE"
+            hdul["SPI.-EBDS-SET"].header["ISDCLEVL"] = "SPE"
+            hdul.flush()
+
+        print('Adding RMF keyword to spectra FITS...')
+        spec_path_list = glob.glob(f'{self.spec_path}/spectra_*')
+        if len(spec_path_list)>0:
+            for sfile in spec_path_list:
+                with fits.open(sfile, mode="update", memmap=True) as hdul:
+                    hdul["SPI.-PHA1-SPE"].header["RESPFILE"] = f"{outRMFfile}.rmf.fits"
+                    hdul.flush()
+        else:
+            print(f'No spectra found in {self.spec_path}. Could no write RESPFILE keyword.')
+        
 

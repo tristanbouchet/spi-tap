@@ -4,3 +4,6 @@ scw_db_path, /home/tbouchet/ScwDB_0016-2887_reduced_filterGTI.fits.gz
 gnrl_cat_path, /home/tbouchet/cat/nrt_cat_tristan.fits
 all_revs_path, /data1/ipp_afs_mirror/integral/shared_analysis/cookbook/revolutions/all_revs.fits
 bkg_db_dir, /home/tbouchet/BKG_DB
+rmfgen_path, /data1/ipp_afs_mirror/osa-10.0/linux64_sw-10.0/bin
+inRMFfile, /data1/ipp_afs_mirror/integral/data/ic/current/ic/spi/rsp/spi_rmf_grp_0002.fits
+cfitsio_templates_dir,  /data1/ipp_afs_mirror/integral/software/osa/osa-10.0/linux64_sw-10.0/templates

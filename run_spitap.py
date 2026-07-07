@@ -8,12 +8,16 @@ import os
 if __name__ == '__main__':
 
     initial_dir= os.getcwd()
+    initial_env = os.environ.copy()
+
+    # TO DO: make better logo when launching pipeline
     print('*** SPI Observation Pipeline ***\n')
     
     obs = st.ObsSPI(
         # main_dir = initial_dir+'/obs',
         main_dir = '/home/tbouchet/SPI_SOURCES/obs',
         initial_dir=initial_dir,
+        initial_env=initial_env,
         testrun=False
         )
     
@@ -37,12 +41,18 @@ if __name__ == '__main__':
     
     print('\n=== Flux extraction (spimodfit) ===\n')
     obs.make_spimodfit_par_interactive()
+    print('\n=== Results from spimodfit ===\n')
+    obs.analyze_spimodfit(verbose=True)
 
     print('\n=== Response matrix generation (spirmfgen) ===\n')
     obs.generate_response()
 
-    # print('\n*** Pipeline completed ***\n')
+    print('\n****** Pipeline completed ******\n')
+    print(f'Spectra available at {os.getcwd()}')
 
-    # back to original place
+    # go back to initial dir and reset env
+    os.environ.clear()
+    os.environ.update(initial_env)
     os.chdir(initial_dir)
+    
 
