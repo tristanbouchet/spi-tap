@@ -1,3 +1,4 @@
+# spi_cat_path, /home/tbouchet/cat/spi_cat_2023.fits
 spi_cat_path, /home/tbouchet/cat/spi_cat_2023.fits
 data_dir, /mnt/kiwi/INTEGRAL/Private_low
 scw_db_path, /home/tbouchet/ScwDB_0016-2887_reduced_filterGTI.fits.gz

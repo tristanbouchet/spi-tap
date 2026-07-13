@@ -55,6 +55,11 @@ python setup.py bdist_wheel
 pip install dist/spitap-1.0-py3-none-any.whl
 ```
 
+For quick spectral fitting, also install lmfit
+```console
+conda install -c conda-forge lmfit
+```
+
 Next, you should create a main analysis directory in your location of choice. Avoid creating it in the spi-tap repo directory (i.e. where the original spi_obs.py script is).
 
 ```console

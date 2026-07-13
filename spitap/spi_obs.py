@@ -100,7 +100,6 @@ class ObsSPI:
         
         self.scw_tracer_db = ScwTracerDB(self.scw_db_path)
         self.obs_bkg = None
-        self.livetime_rev = None
         self.bkg_dict = None
 
         # default query values
@@ -247,55 +246,23 @@ class ObsSPI:
                 process = subprocess.Popen(CMD, stdout=log, stderr=subprocess.STDOUT, text=True,
                                            env=cmd_env)
                 # show cycling dots to indicate the command is running
-                n_dots= 4
-                dot_frames = ['.'*i for i in range(1,n_dots+1)]
-                i = 0
+                n_dots= 3
+                dot_frames = ['.'*i for i in range(0, n_dots+1)]
+                i=0
                 while process.poll() is None:
-                    print(f'\rRunning command{dot_frames[i % n_dots]}', end='', flush=True)
+                    print(f'\rRunning command{dot_frames[i % (n_dots+1)]:<{n_dots+1}}', end='', flush=True)
                     i += 1
                     time.sleep(0.5)
-                print('\r   \r', end='', flush=True)
                 
                 log.write(f"\n{socket.gethostname()} {datetime.now()}\n")
             
-            print(f"Command completed with exit status: {process.returncode}")
+            print(f"\nCommand completed with exit status: {process.returncode}")
             print(f"Output logged to {logfile}")
             return process.returncode
         
         except Exception as e:
             print(f"Error running command: {e}")
             return False
-    
-    # def run_spi_cmd(self, CMD, logfile = 'spiselectscw.log', isolate_env=True):
-    #     """run a command outside python within its own isolated env
-    #     used for: spiselectscw, spimodfit, rmfgen
-    #     """
-    #     if isolate_env:
-    #         if self.initial_env is not None:
-    #             cmd_env = self.initial_env.copy()
-    #         else:
-    #             cmd_env = os.environ.copy()
-    #     else:
-    #         cmd_env = None
-
-    #     try:
-    #         with open(logfile, 'w') as log:
-    #             log.write(f"{socket.gethostname()} {datetime.now()}\n")
-    #             log.write(f"Command: {CMD}\n")
-    #             log.flush()
-                
-    #             result = subprocess.run(CMD, stdout=log, stderr=subprocess.STDOUT, text=True,
-    #                                     env=cmd_env)
-                
-    #             log.write(f"\n{socket.gethostname()} {datetime.now()}\n")
-            
-    #         print(f"Command completed with exit status: {result.returncode}")
-    #         print(f"Output logged to {logfile}")
-    #         return result.returncode
-        
-    #     except Exception as e:
-    #         print(f"Error running command: {e}")
-    #         return False
         
     ########## Source ##########
 
@@ -401,6 +368,8 @@ class ObsSPI:
         self.unique_revs = self.df_select.REV.unique()
         self.N_unique_revs = len(self.unique_revs)
         print(f"Found {self.N_point_select} pointings, for {self.N_unique_revs} unique revolutions.")
+        if self.N_unique_revs < 20:
+            print(self.unique_revs)
         print(f"Total exposure: {self.df_select.TElapse.sum()/1000:,.1f} ks")
     
     def select_observations_interactive(self):
@@ -669,6 +638,7 @@ out_expo_map_dol,s,h,"expo.fits",,,"Name of the output exposure map. None if lef
                 print(f'Check log file {os.getcwd()}/spiselectscw.log')
                 os.chdir(self.initial_dir)
                 raise AssertionError()
+            
         else:
             os.chdir(self.ener_dir)
     
@@ -691,19 +661,29 @@ out_expo_map_dol,s,h,"expo.fits",,,"Name of the output exposure map. None if lef
     ########## Background ##########
 
     def process_background(self):
-        """Process background for the observation using python background module"""
+        """Process background for the observation using python background module
+        """
         
-        scw_db_path = 'scw.fits.gz'
-        self.obs_bkg = ObsBkg(f'{self.main_dir}/{self.src_dir}/{self.date_dir}/{self.ener_dir}', self.evt_type)
-        self.livetime_rev = LiveTimeRev(self.bkg_db_dir+'/det_livetime_rev.fits', self.evt_type)
-        scw_tracer_db = ScwTracerDB(scw_db_path)
-        self.obs_bkg.load_tracer(scw_tracer_db)
-        self.obs_bkg.normalize_tracer(self.livetime_rev)
-        self.obs_bkg.init_rev_bkg_list(self.livetime_rev, self.bkg_db_dir)
-        self.bkg_dict = self.obs_bkg.calc_bkg()
-        self.obs_bkg.write_output_bkg()
+        self.ener_path = f'{self.main_dir}/{self.src_dir}/{self.date_dir}/{self.ener_dir}'
+        # check if bkg dir was already created
+        bg_path_list = glob.glob(f'{self.ener_path}/spi/bg-*')
 
-        self.bkg_dir = self.obs_bkg.output_dir
+        if len(bg_path_list) > 0:
+            print('Background directory found.')
+            self.bkg_dir = bg_path_list[0]
+
+        else:
+            print('Preparing background dir...')
+            scw_db_path = 'scw.fits.gz'
+            self.obs_bkg = ObsBkg(self.ener_path, self.evt_type)
+            livetime_rev = LiveTimeRev(self.bkg_db_dir+'/det_livetime_rev.fits', self.evt_type)
+            scw_tracer_db = ScwTracerDB(scw_db_path)
+            self.obs_bkg.load_tracer(scw_tracer_db)
+            self.obs_bkg.normalize_tracer(livetime_rev)
+            self.obs_bkg.init_rev_bkg_list(livetime_rev, self.bkg_db_dir)
+            self.bkg_dict = self.obs_bkg.calc_bkg()
+            self.obs_bkg.write_output_bkg()
+            self.bkg_dir = self.obs_bkg.output_dir
     
     ########## Flux (spimodfit) ##########
 
@@ -790,13 +770,13 @@ source_parameters_fit,i,h,1,0,1,"Sources fit parameter 1=yes"
             if src_var_unit == 'r':
 
                 spimodfit_par_str += f"""
-source_var_coef,s,h,"{src_var_n} {src_var_unit} {src_var_type}",,,"Time variability definition : d(ays)/p(pointings) + i(ncrements)/n(nodes")
+source_var_coef,s,h,"&{self.all_revs_path}[1] col=TIME_PERIGEE d n, 1435.41635 1659.46 3337.5 3799.66740 d n",,,"Time variability definition : d(ays)/p(pointings) + i(ncrements)/n(nodes)"
 sources_zenith_angle,r,h,{src_max_angle},0,," Sources maximum zenithal angle"
 
     """
             else:
                 spimodfit_par_str += f"""# VARIATION PER REVOLUTION
-source_var_coef,s,h,"&{self.all_revs_path}[1] col=TIME_PERIGEE d n, 1435.41635 1659.46 3337.5 3799.66740 d n",,,"Time variability definition : d(ays)/p(pointings) + i(ncrements)/n(nodes)"
+source_var_coef,s,h,"{src_var_n} {src_var_unit} {src_var_type}",,,"Time variability definition : d(ays)/p(pointings) + i(ncrements)/n(nodes")
 sources_zenith_angle,r,h,{src_max_angle},0,," Sources maximum zenithal angle"
 
     """
@@ -871,21 +851,27 @@ background_var_coef_02,s,h,"{bkg_var_n} {bkg_var_unit} {bkg_var_type}",,,"Time v
                            )
     
     def analyze_spimodfit(self, chi2_threshold = .4, verbose=True):
+        '''TO DO: make df that contains all spimodfit info'''
         with open('spimodfit.log', 'r') as f_fit:
             spimodfit_log = f_fit.readlines()
             pearson_chi2_log = [l.split('=')[-1] for l in spimodfit_log if "Corresponding Pearson's chi2 stat / dof" in l]
             pearson_chi2_list = np.array([float(p.split('/dof')[0]) for p in pearson_chi2_log])
-            count_chi2_threshold = (np.abs(pearson_chi2_list - 1) > chi2_threshold).sum()
+            dof_list = np.array([int(p.split(' ')[2][1:]) for p in pearson_chi2_log])
+            channels_above_thresh = np.where(np.abs(pearson_chi2_list - 1) > chi2_threshold)[0]
             if verbose:
                 print(f"Pearson's chi2 stat / dof for each energy bin")
+                print(f'{'bin':<3}  {'E range (keV)':<15}   {'chi2/dof'}')
                 for i in range(len(pearson_chi2_list)):
                     if np.abs(pearson_chi2_list[i] - 1) > chi2_threshold:
-                        print(f'{BOLD}{RED}{self.e_channels[i]} - {self.e_channels[i+1]} : {pearson_chi2_list[i]:.2f}{RESET}')
+                        print(f'{BOLD}{RED}{i:<3}: {self.e_channels[i]:<6} - {self.e_channels[i+1]:<6} : {pearson_chi2_list[i]:.2f}{RESET} ({dof_list[i]} dof)')
+                        # print(f'{BOLD}{RED}{i}: {self.e_channels[i]} - {self.e_channels[i+1]} : {pearson_chi2_list[i]:.2f}{RESET}')
                     else:
-                        print(f'{self.e_channels[i]} - {self.e_channels[i+1]} : {pearson_chi2_list[i]:.2f}')
-            if count_chi2_threshold > 0:
-                print(f'Warning! {count_chi2_threshold} energy bins have a chi2 above the set threshold. Re-running spimodfit or ignoring these channels is recommanded.')
-
+                        print(f'{i:<3}: {self.e_channels[i]:<6} - {self.e_channels[i+1]:<6} : {pearson_chi2_list[i]:.2f} ({dof_list[i]} dof)')
+                        # print(f'{i}: {self.e_channels[i]} - {self.e_channels[i+1]} : {pearson_chi2_list[i]:.2f}')
+            if len(channels_above_thresh) > 0:
+                print(f'Warning! {len(channels_above_thresh)} energy bins have a chi2 above the set threshold.')
+                print(f'Channels: {channels_above_thresh.tolist()}')
+                print('Re-running spimodfit or ignoring these channels is recommanded.')
 
             
     ########## Response generation (spirmfgen) ##########
@@ -930,6 +916,7 @@ background_var_coef_02,s,h,"{bkg_var_n} {bkg_var_unit} {bkg_var_type}",,,"Time v
 
         if err_code == 0:
             self.add_rmf_keywords(outRMFfile=outRMFfile)
+            self.fix_spec_extensions(outRMFfile=outRMFfile)
 
         return err_code
     
@@ -953,5 +940,19 @@ background_var_coef_02,s,h,"{bkg_var_n} {bkg_var_unit} {bkg_var_type}",,,"Time v
                     hdul.flush()
         else:
             print(f'No spectra found in {self.spec_path}. Could no write RESPFILE keyword.')
-        
+    
+    def fix_spec_extensions(self, outRMFfile='rmf_spi'):
+        print('Modifying spectra and RMF extension for 3ML compatibility')
+        # Update second extension (extension 2) -> EXTNAME = 'MATRIX'
+        with fits.open(f"{outRMFfile}.rmf.fits", mode="update", memmap=True) as hdul:
+            hdul[2].header["EXTNAME"] = "MATRIX"
+            hdul[3].header["EXTNAME"] = "EBOUNDS"
+
+        # Update second extension (extension 2) -> EXTNAME = 'SPECTRUM'
+        spec_path_list = glob.glob(f'{self.spec_path}/spectra_*')
+        if len(spec_path_list)>0:
+            for sfile in spec_path_list:
+                with fits.open(sfile, mode="update", memmap=True) as hdul:
+                    hdul[2].header["EXTNAME"] = "SPECTRUM"
+
 
