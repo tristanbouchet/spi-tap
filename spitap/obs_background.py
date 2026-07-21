@@ -18,6 +18,10 @@ import os
 from time import time
 from datetime import datetime
 
+RED = "\033[31m"
+GREEN = "\033[32m"
+RESET = "\033[0m"
+
 def timer(func):
     '''add @timer before function call to print computation time'''
     @functools.wraps(func)
@@ -43,8 +47,8 @@ class LiveTimeRev:
     
     def find_live_pid(self, rev: str):
         '''returns the array containing the live time of each detector for a rev'''
-        rev_idx = self.det_live_rdx[int(rev)]
-        if rev_idx==-1:
+        rev_idx = self.det_live_rdx[int(rev) - 1]
+        if rev_idx == -1:
             print(f'rev {rev} not in index of {self.livetime_path}')
             return None
         # convert into numpy array
@@ -180,7 +184,7 @@ class RevBkg:
         '''
         live_time_array = livetime_rev.find_live_pid(self.pid)
         if live_time_array is None:
-            print(f'no live time found for {self.period_type} {self.pid}')
+            print(f'{RED}No live time found for {self.period_type} {self.pid}!{RESET}')
             return
         # avoid division by 0 for dead det
         live_time_array = [1. if l==0 else l for l in live_time_array ]

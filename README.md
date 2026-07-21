@@ -1,7 +1,9 @@
 SPI-TAP — SPI Transient Analysis Pipeline
 
-Runs the entire SPI pipeline for a point source, given dates, energy bins and source variability.
-Can be called directly for quick interactive session, or imported for automatized analysis. 
+This code allows to run the INTEGRAL/SPI analysis on the AG Siegert ga05us server in Würzburg.
+
+It runs the entire SPI pipeline for a point source, given: dates, energy bins and source variability.
+It can be called directly for quick interactive session, or imported for automatized analysis. 
 
 # Requirements
 
@@ -55,7 +57,7 @@ python setup.py bdist_wheel
 pip install dist/spitap-1.0-py3-none-any.whl
 ```
 
-For quick spectral fitting, also install lmfit
+For quick spectral fitting, also install lmfit (https://github.com/lmfit/lmfit-py)
 ```console
 conda install -c conda-forge lmfit
 ```
@@ -79,7 +81,9 @@ import spitap
 
 # Spectra analysis
 
-After running the pipeline for a source, they can be copied locally and analyzed there (using e.g. XSpec). Otherwise, a jupyter notebook is provided which shows an exemple of spectral analysis using the 3ML library. To install it, unset some env variables and use pip:
+After running the pipeline, a simple analysis using the spec_fit module (included in SPI-TAP) based on the lmfit library allows to fit the spectrum with simple models (powerlaw, cut-off exponential, ...).
+
+For a more detailed analysis, a jupyter notebook is provided which shows an exemple of spectral analysis using the 3ML library. To install it, unset some env variables and use pip:
 
 ```console
 unsetenv HEADAS PFILES LHEASOFT

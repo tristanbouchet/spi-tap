@@ -107,7 +107,7 @@ class ObsSPI:
         self.initial_default_query={
             'src_dir' : '',
             'full_name' : 'Crab',
-            'date_start' : '2003-01-01', 'date_end' : '2025-01-01', 'off_angle' : '15',
+            'date_start' : '2003-01-01', 'date_end' : '2025-01-01', 'off_angle' : '10',
             'evt_type' : 'SE',
             'binning_type' : 'log',
             # TO DO: additional keywords for PSD
@@ -115,7 +115,7 @@ class ObsSPI:
             'N_chan' : '20',
             'e_channels_bounds' : '20. 50. 200. 400.',
             'e_channels_scales' : '2 -20 2',
-            'src_var_n' : '0', 'src_var_unit' : 'd', 'src_var_type' : 'n', 'src_max_angle' : '20.',
+            'src_var_n' : '0', 'src_var_unit' : 'd', 'src_var_type' : 'n', 'src_max_angle' : '10.',
             'bkg_var_n' : '1', 'bkg_var_unit' : 'd', 'bkg_var_type' : 'i'
         }
         self.initial_default_spimodfit={k: self.initial_default_query[k] 
@@ -302,7 +302,8 @@ class ObsSPI:
         if self.ra is not None:
             self.lat_src_coord, self.long_src_coord = self.radec_to_galactic_180range(self.ra, self.dec)
             print(f'Galactic coordinates: l={self.long_src_coord:.2f}° b={self.lat_src_coord:.2f}°')
-    
+        self.source_coord = SkyCoord(ra=self.ra*u.deg, dec=self.dec*u.deg)
+
     def setup_source_interactive(self):
         """Interactive setup of source directory and information"""
         full_name = None
@@ -357,9 +358,9 @@ class ObsSPI:
         else:
             self.df_select = self.scw_tracer_db.df_scw.loc[(self.scw_tracer_db.df_scw.DateStart < date_end) & (self.scw_tracer_db.df_scw.DateEnd > date_start)]
             print(f'Searching for pointings within {off_angle}° of source...')
-            source_coord = SkyCoord(ra=self.ra*u.deg, dec=self.dec*u.deg)
+            # source_coord = SkyCoord(ra=self.ra*u.deg, dec=self.dec*u.deg)
             self.df_select['skycoord'] = self.df_select.apply(lambda x:SkyCoord(ra=x.RA_SCX*u.deg, dec=x.DEC_SCX*u.deg), axis=1)
-            self.df_select['dist_angle'] = self.df_select['skycoord'].apply(lambda x:source_coord.separation(x).value)
+            self.df_select['dist_angle'] = self.df_select['skycoord'].apply(lambda x:self.source_coord.separation(x).value)
             self.df_select = self.df_select[self.df_select.dist_angle < off_angle]
             print('Saving df...')
             self.df_select.to_csv('df_select.csv')
@@ -367,8 +368,8 @@ class ObsSPI:
         self.N_point_select = len(self.df_select)
         self.unique_revs = self.df_select.REV.unique()
         self.N_unique_revs = len(self.unique_revs)
-        print(f"Found {self.N_point_select} pointings, for {self.N_unique_revs} unique revolutions.")
-        if self.N_unique_revs < 20:
+        print(f"{GREEN}Found {self.N_point_select} pointings, for {self.N_unique_revs} unique revolutions.{RESET}")
+        if self.N_unique_revs < 30:
             print(self.unique_revs)
         print(f"Total exposure: {self.df_select.TElapse.sum()/1000:,.1f} ks")
     
@@ -648,7 +649,7 @@ out_expo_map_dol,s,h,"expo.fits",,,"Name of the output exposure map. None if lef
         (with interactive input)
         """
         if os.path.isdir(self.ener_dir):
-            rm_ener_dir = self.query(f"{self.ener_dir} dir already exists. Remove it? (y/n)", "y")
+            rm_ener_dir = self.query(f"{self.ener_dir} dir already exists. Remove it? (y/n)", "n")
             if rm_ener_dir == 'y':
                 shutil.rmtree(self.ener_dir, ignore_errors=True)
                 # os.rmdir(self.ener_dir)
@@ -684,11 +685,36 @@ out_expo_map_dol,s,h,"expo.fits",,,"Name of the output exposure map. None if lef
             self.bkg_dict = self.obs_bkg.calc_bkg()
             self.obs_bkg.write_output_bkg()
             self.bkg_dir = self.obs_bkg.output_dir
+
     
+    ########## Sources selection ##########
+
+
+    def select_sources(self, zenith_angle=10, N_max_bright = 15):
+        '''
+        find all sources within zenith angle + max off-axis angle
+        select brightest sources based on flux previously measured
+        '''
+        self.zenith_angle = zenith_angle
+        self.max_angle = zenith_angle + self.off_angle
+        assert self.spi_cat_path is not None, 'No catalog loaded! check config.txt file.'
+        self.cat = CatSPI(self.spi_cat_path)
+        self.nearby_df = self.cat.find_nearby_sources(self.source_coord, self.max_angle, N_max_bright)
+        nearby_src_list = self.nearby_df.iloc[:N_max_bright].NAME.tolist()
+
+    
+    def select_sources_interactive(self):
+        
+        pass
+
+
+
     ########## Flux (spimodfit) ##########
 
-    def run_spimodfit(self, run_id, clobber=False):
+    def run_spimodfit(self, run_id, clobber=True):
         """Execute the spimodfit command following the submit-spimodfit_v3.2_ga05us.sh script
+        use clobber=None for interactive sessions
+        other True/False to remove directory
         """
         
         CMD = "/data1/ipp_afs_mirror/integral/software/local/spimodfit/3.2/amd64_sles11_g++/spimodfit"
@@ -700,6 +726,10 @@ out_expo_map_dol,s,h,"expo.fits",,,"Name of the output exposure map. None if lef
         
         subdir = run_id
         if os.path.exists(subdir):
+            if clobber is None: # for interactive sessions
+                clobber_query= self.query(f'Directory {subdir} exists. Remove it? (y/n)', 'y')
+                if clobber_query =='y': clobber = True
+                else: clobber = False
             if clobber:
                 print(f"Removing existing directory {subdir}...")
                 shutil.rmtree(subdir, ignore_errors=True)
@@ -812,7 +842,7 @@ background_var_coef_02,s,h,"{bkg_var_n} {bkg_var_unit} {bkg_var_type}",,,"Time v
                 f_out.write(combined_content)
             
             print(f'Parameter file created: {output_par_file}')
-            self.spimodfit_return_code = self.run_spimodfit(self.fit_dir)
+            self.spimodfit_return_code = self.run_spimodfit(self.fit_dir, clobber=None)
 
             if self.spimodfit_return_code != 0:
                 print(f'spimodfit failed to complete (Error code {self.spimodfit_return_code}).')
@@ -838,38 +868,40 @@ background_var_coef_02,s,h,"{bkg_var_n} {bkg_var_unit} {bkg_var_type}",,,"Time v
             src_max_angle = self.query('Max off-angle for catalog sources selection', default_key='src_max_angle')
             print('* Source variability: Time variability definition')
             src_var_unit = self.query('Variability unit? (p=pointing, d=day, r=revolution)', default_key='src_var_unit')
-            src_var_n = self.query('Variability number? (0 or odd)', default_key='src_var_n')
+            src_var_n = self.query('Variability number? (int)', default_key='src_var_n')
             src_var_type = self.query('Variability type? (i(ncrements)/n(nodes))', default_key='src_var_type')
 
             print('* Background variability: Time variability definition')
             bkg_var_unit = self.query('Variability unit? (p=pointing, d=day, r=revolution)', default_key='bkg_var_unit')
-            bkg_var_n = self.query('Variability number? (>=0)', default_key='bkg_var_n')
+            bkg_var_n = self.query('Variability number? (int)', default_key='bkg_var_n')
             bkg_var_type = self.query('Variability type? (i(ncrements)/n(nodes))', default_key='bkg_var_type')
 
             self.make_spimodfit_par(src_var_n=src_var_n, src_var_unit=src_var_unit, src_var_type=src_var_type, src_max_angle=src_max_angle,
                            bkg_var_n=bkg_var_n, bkg_var_unit=bkg_var_unit, bkg_var_type=bkg_var_type
                            )
     
-    def analyze_spimodfit(self, chi2_threshold = .4, verbose=True):
+    def analyze_spimodfit(self, sigma_threshold = 4, verbose=True):
         '''TO DO: make df that contains all spimodfit info'''
         with open('spimodfit.log', 'r') as f_fit:
             spimodfit_log = f_fit.readlines()
             pearson_chi2_log = [l.split('=')[-1] for l in spimodfit_log if "Corresponding Pearson's chi2 stat / dof" in l]
             pearson_chi2_list = np.array([float(p.split('/dof')[0]) for p in pearson_chi2_log])
             dof_list = np.array([int(p.split(' ')[2][1:]) for p in pearson_chi2_log])
+
+            chi2_threshold = sigma_threshold * np.sqrt(2/dof_list)
             channels_above_thresh = np.where(np.abs(pearson_chi2_list - 1) > chi2_threshold)[0]
             if verbose:
-                print(f"Pearson's chi2 stat / dof for each energy bin")
-                print(f'{'bin':<3}  {'E range (keV)':<15}   {'chi2/dof'}')
+                print(f"Pearson's chi2 stat / dof for each energy bin (threshold = {sigma_threshold} sigma)")
+                print(f'{'bin':<3}  {'E range (keV)':<15}   {'chi2 red./dof'}')
                 for i in range(len(pearson_chi2_list)):
-                    if np.abs(pearson_chi2_list[i] - 1) > chi2_threshold:
-                        print(f'{BOLD}{RED}{i:<3}: {self.e_channels[i]:<6} - {self.e_channels[i+1]:<6} : {pearson_chi2_list[i]:.2f}{RESET} ({dof_list[i]} dof)')
+                    if np.abs(pearson_chi2_list[i] - 1) > chi2_threshold[i]:
+                        print(f'{BOLD}{RED}{i:<3}: {self.e_channels[i]:<6} - {self.e_channels[i+1]:<6} : {pearson_chi2_list[i]:.2f} ({dof_list[i]} dof) (thres= ± {chi2_threshold[i]:.3f}){RESET}')
                         # print(f'{BOLD}{RED}{i}: {self.e_channels[i]} - {self.e_channels[i+1]} : {pearson_chi2_list[i]:.2f}{RESET}')
                     else:
-                        print(f'{i:<3}: {self.e_channels[i]:<6} - {self.e_channels[i+1]:<6} : {pearson_chi2_list[i]:.2f} ({dof_list[i]} dof)')
+                        print(f'{i:<3}: {self.e_channels[i]:<6} - {self.e_channels[i+1]:<6} : {pearson_chi2_list[i]:.2f} ({dof_list[i]} dof) (thres= ± {chi2_threshold[i]:.3f})')
                         # print(f'{i}: {self.e_channels[i]} - {self.e_channels[i+1]} : {pearson_chi2_list[i]:.2f}')
             if len(channels_above_thresh) > 0:
-                print(f'Warning! {len(channels_above_thresh)} energy bins have a chi2 above the set threshold.')
+                print(f'\n! Warning ! {len(channels_above_thresh)} energy bins have a chi2 above the set threshold.')
                 print(f'Channels: {channels_above_thresh.tolist()}')
                 print('Re-running spimodfit or ignoring these channels is recommanded.')
 
@@ -954,5 +986,90 @@ background_var_coef_02,s,h,"{bkg_var_n} {bkg_var_unit} {bkg_var_type}",,,"Time v
             for sfile in spec_path_list:
                 with fits.open(sfile, mode="update", memmap=True) as hdul:
                     hdul[2].header["EXTNAME"] = "SPECTRUM"
+
+
+class CatSPI:
+    def __init__(self, cat_path=None, cat_ext='SPI.-SRCL-CAT'):
+        self.cat_path = cat_path
+        self.cat_ext = cat_ext
+        self.hdul = fits.open(cat_path, uint=False)
+        cat_hdu = self.hdul[cat_ext]
+        self.header = cat_hdu.header
+        self.table = cat_hdu.data
+
+    @staticmethod
+    def _norm_name(x):
+        return x.decode("utf-8", errors="ignore").strip() if isinstance(x, (bytes, np.bytes_)) else str(x).strip()
+
+
+    def find_nearby_sources(self, target, max_angle=20, flux_col = 'FLUX_CRAB_LB', flux_element= 0,
+                     ra_colname = "RA_OBJ", dec_colname = "DEC_OBJ"):
+        '''find all sources within max_angle sorted by their flux'''
+
+        # find closest sources
+        src_coords = SkyCoord(self.table[ra_colname] * u.deg, self.table[dec_colname] * u.deg, frame="icrs")
+        sep_deg = target.separation(src_coords).deg
+        mask = sep_deg <= max_angle
+        sel_idx = np.where(mask)[0]
+
+        # Flux value used for sorting (vector column element or scalar column)
+        flux_data = self.table[flux_col]
+        flux_val = flux_data[sel_idx, flux_element]
+
+        # Sort by flux element
+        order = np.argsort(flux_val)[::-1]
+        sel_idx = sel_idx[order]
+        flux_val = flux_val[order]
+
+        sources_table = pd.DataFrame({
+            "NAME": [self._norm_name(v) for v in self.table["NAME"][sel_idx]],
+            ra_colname: self.table[ra_colname][sel_idx],
+            dec_colname: self.table[dec_colname][sel_idx],
+            "SEP_DEG": sep_deg[sel_idx],
+            f"{flux_col}[{flux_element}]": flux_val,
+        })
+        print(f'Found {len(sources_table)} sources in catalog within {max_angle}° of target sources (RA={target.ra.value:.2f}, Dec={target.dec.value:.2f})')
+        sources_table.reset_index(drop=True, inplace=True)
+        sources_table[f"FLUX (mCrab)"] = sources_table[f"{flux_col}[{flux_element}]"] * 1e3
+        return sources_table
+    
+    def update_src_params(self, all_src_dico: dict):
+        '''
+        update many parameters of many sources
+        all_src_dico should contain a dico for each src name with parameter name and value inside 
+        '''
+        for src in all_src_dico.keys():
+            src_dico = all_src_dico[src]
+            if src in self.table.NAME:
+                for par_key in src_dico.keys():
+                    self.table[self.table.NAME == src][par_key] = src_dico[par_key]
+
+
+    def select_src(self, list_src, save_dir=None, save_name='nearby_cat.fits'):
+        '''make a new catalog restricted to a list of sources'''
+        cat_names = np.array([self._norm_name(n) for n in self.table["NAME"]])
+        new_table = self.table[np.isin(cat_names, list_src)]
+
+        if save_dir is not None:
+            # copy HDUL and change cat table to save to new FITS
+            new_hdul = self.hdul.copy()
+            new_hdul[self.cat_ext].data = new_table
+            # new_hdus = [new_cat_hdu if hdu.name == "SPI.-SRCL-CAT" else hdu.copy() for hdu in self.hdul]
+            new_cat_path = f"{new_cat_path}/{save_name}"
+            fits.HDUList(new_hdul).writeto(new_cat_path, overwrite=True)
+            print(f'New cat written at {new_cat_path}')
+
+        return new_table
+
+
+        
+
+    def add_src(self, src_dico, confusion_angle=1, ref_src_name = 'Crab'):
+        '''
+        add new source to catalog.
+        check whether there is already a source within the confusion_angle first.
+        for parameters not found in the src_dico, a reference row with ref_src_name is used.
+        '''
+        pass
 
 

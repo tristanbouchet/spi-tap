@@ -250,9 +250,8 @@ class Fit:
         flux_E = np.linspace(e_flux_min, e_flux_max, N_flux_bin) # energy bins for integration
         dE = np.diff(flux_E)
         uf = self.model.calc(flux_E, self.model_parameters)[:-1] # ph/cm2/s/keV remove last one for "left rectangle" integral
-        # uf = calc_model_flux(flux_E, self.model_parameters, self.model_name)[:-1] # ph/cm2/s/keV remove last one for "left rectangle" integral
         euf = kev_to_erg * uf * flux_E[:-1] # erg/cm2/s/keV
-        f_dico = {key: np.sum(f * dE) for (key,f) in zip(['euf','eeuf'],[uf,euf])} 
+        f_dico = {key: np.sum(f * dE) for (key,f) in zip(['euf', 'eeuf'],[uf, euf])} 
         if verbose:
             print('flux in {} - {} keV: {:.2e} erg/cm2/s , {:.2e} ph/cm2/s'.format(e_flux_min, e_flux_max, f_dico['eeuf'],f_dico['euf']))
         return f_dico[flux_type]

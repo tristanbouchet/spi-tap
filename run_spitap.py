@@ -11,7 +11,9 @@ if __name__ == '__main__':
     initial_env = os.environ.copy()
 
     # TO DO: make better logo when launching pipeline
-    print('*** SPI Observation Pipeline ***\n')
+    print('***************************************')
+    print('*** SPI Transient Analysis Pipeline ***\n')
+    print('***************************************')
     
     obs = st.ObsSPI(
         # main_dir = initial_dir+'/obs',
@@ -21,7 +23,7 @@ if __name__ == '__main__':
         testrun=False
         )
     
-    print(f'Main observation directory is {obs.main_dir}\n')
+    print(f'\nMain observation directory:\n{obs.main_dir}\n')
 
     print('Tip: default values can be selected by simply pressing enter.\n')
     print('\n=== Source Selection ===\n')
