@@ -1,18 +1,23 @@
 """
 SPI-TAP — SPI Transient Analysis Pipeline
 Runs the entire SPI pipeline for a point source, given dates, energy bins and source variability.
-Can be called directly for quick interactive session, or imported for automatized analysis. 
+Can be called directly for quick interactive session, or imported for automatized analysis.
+
+Note that ALL the absolute paths to config files or commands are contained in: config.txt
 
 Main analysis steps:
 - select data with dates, position and angle
 - prepare data with spiselectscw and energy bounds
 - create background model with obs_background.py module
-- select variability parameters for source and bkg
-(WIP
-- run model fitting with spimodfit
-- create source spectra with response)
+- select sources in FOV from catalog
+- select variability parameters for sources and bkg
+- run spimodfit and generate spectral response
 
+TO DO:
+method to import run parameters (dates, energies, etc...) from txt file
 """
+
+print('Loading spi_obs module...\n')
 
 import pandas as pd
 import numpy as np
@@ -29,6 +34,8 @@ from datetime import datetime
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 from astropy.io import fits
+from astropy.table import Table
+from astropy.time import Time
 
 from .obs_background import ScwTracerDB, ObsBkg, LiveTimeRev
 
@@ -39,6 +46,14 @@ BLUE = "\033[34m"
 WHITE = "\033[37m"
 RESET = "\033[0m"
 BOLD = "\033[1m"
+
+IJD_start_MJD = 51544
+
+def mjd_to_isot(x):
+    '''convert MJD values into plot-able ISO dates'''
+    isot=Time(x, format='mjd') # charge MJD dates with astropy
+    isot.format='isot' # convert to ISO (YYYY-MM-DD)
+    return np.datetime64(isot.value) # convert to plot-able dates
 
 class ObsSPI:
     """Pipeline for SPI observation analysis"""
@@ -102,12 +117,16 @@ class ObsSPI:
         self.obs_bkg = None
         self.bkg_dict = None
 
+        # import all revs perigee times
+        self.import_rev_nodes()
+
         # default query values
         self.update_default_dico = True
         self.initial_default_query={
             'src_dir' : '',
             'full_name' : 'Crab',
-            'date_start' : '2003-01-01', 'date_end' : '2025-01-01', 'off_angle' : '10',
+            'date_start' : '2003-01-01', 'date_end' : '2025-01-01',
+            'off_angle' : '10',
             'evt_type' : 'SE',
             'binning_type' : 'log',
             # TO DO: additional keywords for PSD
@@ -115,11 +134,13 @@ class ObsSPI:
             'N_chan' : '20',
             'e_channels_bounds' : '20. 50. 200. 400.',
             'e_channels_scales' : '2 -20 2',
-            'src_var_n' : '0', 'src_var_unit' : 'd', 'src_var_type' : 'n', 'src_max_angle' : '10.',
+            'zenith_angle':'10', 'src_sel':'10',
+            'main_src_var_n':'d', 'main_src_var_unit':'d', 'main_src_var_type':'i',
+            'src_var_n' : '0', 'src_var_unit' : 'd', 'src_var_type' : 'n', # 'src_max_angle' : '10.',
             'bkg_var_n' : '1', 'bkg_var_unit' : 'd', 'bkg_var_type' : 'i'
         }
         self.initial_default_spimodfit={k: self.initial_default_query[k] 
-            for k in ['src_var_n', 'src_var_unit', 'src_var_type', 'src_max_angle', 'bkg_var_n', 'bkg_var_unit', 'bkg_var_type']
+            for k in ['src_var_n', 'src_var_unit', 'src_var_type', 'bkg_var_n', 'bkg_var_unit', 'bkg_var_type']
         }
         # make shallow copy of initial dico, modified and saved throughout the queries
         self.default_query_dico = self.initial_default_query.copy()
@@ -146,7 +167,19 @@ class ObsSPI:
                     # Set as attribute
                     setattr(self, variable_name, value)
                     print(f'{variable_name} = {value}')
-            
+
+    def import_rev_nodes(self):
+        '''import the perigee time (~ start of revolution) for all revs'''
+        if self.all_revs_path is None:
+            return
+        hdul= fits.open(self.all_revs_path)
+        self.MJDREF = hdul[1].header['MJDREF']
+        self.rev_dates_df = pd.DataFrame({'REV':hdul[1].data['REVOLUTION'],
+                      'IJD_START':hdul[1].data['TIME_PERIGEE'].astype(np.float64)
+                      })
+        self.rev_dates_df['MJD_START'] = self.MJDREF + self.rev_dates.IJD_START
+        self.rev_dates_df['DATE_START'] = self.rev_dates_df.MJD_START.apply(mjd_to_isot)
+        return self.rev_dates_df
 
     ########## Query tools ##########
 
@@ -166,9 +199,10 @@ class ObsSPI:
         with open(f'{self.main_dir}/last_run.pkl', "wb") as f_init:
             pickle.dump(self.initial_default_query, f_init)
 
-    def query(self, message, default=None, default_key=None):
+    def query(self, message, default=None, default_key=None, expected_type=None):
         """ask for input. if empty, use default value.
         default_key can also be used instead of default to access value in default dico
+        TO DO: add a while loop to check for type (ex: if input cannot be turned into int, as for input again...)
         """
 
         # if testrun, use default without asking for input.
@@ -192,7 +226,7 @@ class ObsSPI:
             self.save_current_query()
         return value
 
-########## General tools ##########
+    ########## General tools ##########
 
     def radec_to_galactic_180range(self, ra, dec):
         """Convert RA/Dec to Galactic coordinates
@@ -354,6 +388,7 @@ class ObsSPI:
         
         if os.path.isfile('df_select.csv'):
             print('Importing df_select in directory...')
+            # TO DO: import REV as string
             self.df_select = pd.read_csv('df_select.csv')
         else:
             self.df_select = self.scw_tracer_db.df_scw.loc[(self.scw_tracer_db.df_scw.DateStart < date_end) & (self.scw_tracer_db.df_scw.DateEnd > date_start)]
@@ -532,7 +567,7 @@ class ObsSPI:
     def run_spiselectscw(self, run_id):
         """Execute the spiselectscw command following the submit-spiselectscw.sh script."""
         
-        CMD = "/data1/ipp_afs_mirror/integral/software/local/spiselectscw/4.02/amd64_sles11_g++/spiselectscw"
+        # CMD = "/data1/ipp_afs_mirror/integral/software/local/spiselectscw/4.02/amd64_sles11_g++/spiselectscw"
         parfile_path = f'spiselectscw.{run_id}.par'
         
         if not os.path.isfile(parfile_path):
@@ -551,12 +586,10 @@ class ObsSPI:
             os.mkdir('spi')
         
         if not os.path.isfile('spi_off_det.fits'):
-            os.symlink('/data1/ipp_afs_mirror/integral/software/local/spiselectscw/current/spi_off_det.fits',
-                       'spi_off_det.fits')
+            os.symlink(self.spi_off_det, 'spi_off_det.fits')
         
         if not os.path.isfile('spi_gnrl_bti.fits'):
-            os.symlink('/data1/ipp_afs_mirror/integral/data/ic/spi/lim/spi_gnrl_bti_0005.fits',
-                       'spi_gnrl_bti.fits')
+            os.symlink(self.spi_gnrl_bti, 'spi_gnrl_bti.fits')
         
         shutil.copy2(f'../{parfile_path}', 'spiselectscw.par')
         
@@ -577,9 +610,8 @@ class ObsSPI:
             os.symlink('../scw.fits', 'scw.fits')
         
         print(f"Launching spiselectscw (RUN_ID: {run_id})...")
-        err_code = self.run_spi_cmd(CMD, isolate_env=False)
+        err_code = self.run_spi_cmd(self.spiselectscw_cmd, isolate_env=False)
         return err_code
-        
         
 
     def make_spiselectscw_par(self, skip_spalready_exists=False):
@@ -630,6 +662,8 @@ out_expo_map_dol,s,h,"expo.fits",,,"Name of the output exposure map. None if lef
             
             print(f'Parameter file created: {output_par_file}')
             self.spiselectscw_return_code = self.run_spiselectscw(self.ener_dir)
+            # create dir to store fov catalogs
+            os.mkdir('cat')
 
             if not os.path.isfile('energies.txt'):
                 self.write_energies_txt()
@@ -689,24 +723,90 @@ out_expo_map_dol,s,h,"expo.fits",,,"Name of the output exposure map. None if lef
     
     ########## Sources selection ##########
 
-
-    def select_sources(self, zenith_angle=10, N_max_bright = 15):
-        '''
-        find all sources within zenith angle + max off-axis angle
-        select brightest sources based on flux previously measured
-        '''
+    def find_nearby(self, zenith_angle=10):
+        '''find all sources within zenith angle + max off-axis angle'''
         self.zenith_angle = zenith_angle
         self.max_angle = zenith_angle + self.off_angle
         assert self.spi_cat_path is not None, 'No catalog loaded! check config.txt file.'
         self.cat = CatSPI(self.spi_cat_path)
-        self.nearby_df = self.cat.find_nearby_sources(self.source_coord, self.max_angle, N_max_bright)
-        nearby_src_list = self.nearby_df.iloc[:N_max_bright].NAME.tolist()
-
+        self.nearby_df = self.cat.find_nearby_sources(self.source_coord, self.max_angle)
+        return self.nearby_df
+    
+    def select_brightest(self, src_sel = 15):
+        '''select brightest sources'''
+        if type(src_sel) == int:
+            if src_sel <= 0:
+                nearby_src_list = self.nearby_df.NAME.tolist()
+            else:
+                nearby_src_list = self.nearby_df.iloc[:src_sel].NAME.tolist()
+        elif type(src_sel) == list:
+            nearby_src_list = self.nearby_df.iloc[src_sel].NAME.tolist()
+        self.cat.select_src(nearby_src_list)
+        return nearby_src_list
     
     def select_sources_interactive(self):
-        
-        pass
+        zenith_query = self.query(f'Max angle of sources for all pointings?', default_key='zenith_angle')
+        zenith_angle = float(zenith_query)
+        self.find_nearby(zenith_angle)
+        print('Found the following sources:\n', )
+        print(self.nearby_df.to_string(float_format="{:.1f}".format))
 
+        src_sel_query = self.query('Give number to select N brightest (0 to select all), or list (ex: [0, 1, 3]).',
+              default_key='src_sel')
+        if '[' in src_sel_query:
+            src_sel = [int(x) for x in src_sel_query[1:-1].split()]
+        else:
+            src_sel = int(src_sel_query)
+        nearby_src_list = self.select_brightest(src_sel)
+        print(f'Sources selected:', nearby_src_list)
+
+
+    ########## Main source variability ##########
+
+    VAR_UNIT_CONVERSION = {
+        'pi':'constant, pointings, increments', 'di':'constant, days, increments',
+        'pn':'constant, pointings, nodes', 'dn':'constant, days, nodes',
+        'ri':'constant, days, nodes'
+        }
+
+    @staticmethod
+    def convert_var_n_array(n, array_length=8):
+        arr= np.zeros(array_length, dtype=np.int8)
+        arr[0] = n
+        return arr
+        
+    def select_src_var(self, main_src_var_unit, main_src_var_n, main_src_var_type):
+        '''
+        modify the variability in the catalog using keywords: VAR_MODL, VAR_NPAR, VAR_PARS (array)
+        variability unit can be p(ointing) or d(ays) and is converted using a dico into correct catalog value
+        increment number (main_src_var_n) is converted into an array for VAR_PARS
+        for simplicity, VAR_NPAR is always 1
+        '''
+        self.all_src_dico= {}
+        if main_src_var_type == 'i':
+            npar = int(1)
+            par_array = self.convert_var_n_array(main_src_var_n, self.cat.new_table['VAR_PARS'].shape[1])
+        elif main_src_var_type == 'n':
+            np.fromstring(main_src_var_n, dtype=int, sep=' ')
+        elif main_src_var_type == 'r':
+            pass
+        else:
+            raise NotImplementedError(main_src_var_type)
+
+
+        self.all_src_dico[self.full_name] = {
+            'VAR_MODL':self.VAR_UNIT_CONVERSION[main_src_var_unit+main_src_var_type],
+            'VAR_NPAR':npar,
+            'VAR_PARS':par_array
+                                        }
+        self.cat.update_src_params(self.all_src_dico)
+    
+    def select_src_var_interactive(self):
+        print(f'*** Main source variability ({self.full_name}) ***')
+        main_src_var_type = self.query('Variability type? (i=increments, n=nodes)', default_key='main_src_var_type')
+        main_src_var_unit = self.query('Variability unit? (p=pointing, d=day, r=revolution)', default_key='main_src_var_unit')
+        main_src_var_n = self.query('Variability number? (int)', default_key='main_src_var_n')
+        self.select_src_var(main_src_var_unit, main_src_var_n, main_src_var_type)
 
 
     ########## Flux (spimodfit) ##########
@@ -717,7 +817,7 @@ out_expo_map_dol,s,h,"expo.fits",,,"Name of the output exposure map. None if lef
         other True/False to remove directory
         """
         
-        CMD = "/data1/ipp_afs_mirror/integral/software/local/spimodfit/3.2/amd64_sles11_g++/spimodfit"
+        # CMD = "/data1/ipp_afs_mirror/integral/software/local/spimodfit/3.2/amd64_sles11_g++/spimodfit"
         parfile_path = f'spimodfit.{run_id}.par'
         
         if not os.path.isfile(parfile_path):
@@ -746,14 +846,14 @@ out_expo_map_dol,s,h,"expo.fits",,,"Name of the output exposure map. None if lef
         os.environ['PFILES'] = '.'
         
         print(f"Launching spimodfit (RUN_ID: {run_id})...")
-        err_code = self.run_spi_cmd(CMD, logfile='spimodfit.log', isolate_env=False)
+        err_code = self.run_spi_cmd(self.spimodfit_cmd, logfile='spimodfit.log', isolate_env=False)
 
         self.spec_path = f'{self.main_dir}/{self.src_dir}/{self.date_dir}/{self.ener_dir}/{self.fit_dir}'
         return err_code
         
     
-    def make_spimodfit_par(self, src_var_n=0, src_var_unit='d', src_var_type='n', src_max_angle=20.,
-                           bkg_var_n=1, bkg_var_unit='d', bkg_var_type='i',
+    def make_spimodfit_par(self, src_var_n=0, src_var_unit='d', src_var_type='n', src_max_angle=None,
+                           bkg_var_n=1, bkg_var_unit='d', bkg_var_type='i', fov_cat_path=None, overwrite_fov_cat= True,
                            skip_spimodfit_exists=False):
         """create spimodfit parameter file"""
 
@@ -768,7 +868,22 @@ out_expo_map_dol,s,h,"expo.fits",,,"Name of the output exposure map. None if lef
                 raise FileExistsError(f"{self.ener_dir} directory already exists. Set skip_spimodfit_exists=True to skip.")
         
         if not skip_spimodfit:
+            # path to the fit directory where results are stored
+            self.fit_dir = f'fit_{src_var_n}{src_var_unit}{src_var_type}_{bkg_var_n}{bkg_var_unit}{bkg_var_type}'
+
+            # saving mini catalog
+            if fov_cat_path is None:
+                self.fov_cat_path = f'{self.run_path}/cat/fov_cat_{src_var_n}{src_var_unit}{src_var_type}_{bkg_var_n}{bkg_var_unit}{bkg_var_type}.fits'
+            else:
+                self.fov_cat_path = fov_cat_path
+            self.cat.save_cat(self.fov_cat_path, overwrite=overwrite_fov_cat)
+            print(f'FOV catalog saved at {self.fov_cat_path}')
+
+            # print('! Reverting to original cat for testing !')
+            # self.fov_cat_path= self.spi_cat_path
             print('Creating spimodfit parameter file...')
+            if src_max_angle is None:
+                src_max_angle = self.zenith_angle
             
             # File paths, energy binning and catalog
 
@@ -789,7 +904,7 @@ energy_range_min,i,h,1,,,"minimum energy range sequence number as in ebounds fil
 energy_range_max,i,h,{self.Nchan},,,"maximum energy range sequence number as in ebounds file: 1,2,3..."
 
 # ----------- catalog -----------
-source-cat-dol,s,h,"{self.spi_cat_path}",,,"input catalogue of sources "
+source-cat-dol,s,h,"{self.fov_cat_path}",,,"input catalogue of sources "
 
 # ----------- source variability parameters -----------
 source_parameters_fit,i,h,1,0,1,"Sources fit parameter 1=yes" 
@@ -836,7 +951,6 @@ background_var_coef_02,s,h,"{bkg_var_n} {bkg_var_unit} {bkg_var_type}",,,"Time v
                 tpl_content = f_tpl.read()
             
             combined_content = spimodfit_par_str + 5*'\n' + tpl_content
-            self.fit_dir = f'fit_{src_var_n}{src_var_unit}{src_var_type}_{bkg_var_n}{bkg_var_unit}{bkg_var_type}'
             output_par_file = f'spimodfit.{self.fit_dir}.par'
             with open(output_par_file, 'w') as f_out:
                 f_out.write(combined_content)
@@ -858,25 +972,24 @@ background_var_coef_02,s,h,"{bkg_var_n} {bkg_var_unit} {bkg_var_type}",,,"Time v
         """create spiselectscw parameter file
         (with interactive input)
         """
-        print('*** Selecting spimodfit parameters')
+        # print('*** Selecting spimodfit parameters')
         print('Initial default spimodfit parameters:\n', self.initial_default_spimodfit)
         std_spimodfit_query= self.query('Use standard spimodfit analysis? (y/n)', default='n')
         if std_spimodfit_query == 'y':
             self.make_spimodfit_par(**self.initial_default_spimodfit)
 
         else:
-            src_max_angle = self.query('Max off-angle for catalog sources selection', default_key='src_max_angle')
-            print('* Source variability: Time variability definition')
+            print('*** Other sources variability ***\n')
             src_var_unit = self.query('Variability unit? (p=pointing, d=day, r=revolution)', default_key='src_var_unit')
             src_var_n = self.query('Variability number? (int)', default_key='src_var_n')
             src_var_type = self.query('Variability type? (i(ncrements)/n(nodes))', default_key='src_var_type')
 
-            print('* Background variability: Time variability definition')
+            print('*** Background variability ***\n')
             bkg_var_unit = self.query('Variability unit? (p=pointing, d=day, r=revolution)', default_key='bkg_var_unit')
             bkg_var_n = self.query('Variability number? (int)', default_key='bkg_var_n')
             bkg_var_type = self.query('Variability type? (i(ncrements)/n(nodes))', default_key='bkg_var_type')
 
-            self.make_spimodfit_par(src_var_n=src_var_n, src_var_unit=src_var_unit, src_var_type=src_var_type, src_max_angle=src_max_angle,
+            self.make_spimodfit_par(src_var_n=src_var_n, src_var_unit=src_var_unit, src_var_type=src_var_type, src_max_angle=None,
                            bkg_var_n=bkg_var_n, bkg_var_unit=bkg_var_unit, bkg_var_type=bkg_var_type
                            )
     
@@ -928,7 +1041,7 @@ background_var_coef_02,s,h,"{bkg_var_n} {bkg_var_unit} {bkg_var_type}",,,"Time v
         
         print(f"Launching spirmf to generate response matrix...")
         CMD = [
-                    f"{self.rmfgen_path}/spirmf",
+                    f"{self.rmfgen_cmd}",
                     f"rw-grp-dol={self.inRMFfile}[GROUPING]",
                     f"ebounds-dol={self.spimodfit_result_file}[SPI.-EBDS-SET]",
                     f"outfile={outRMFfile}",
@@ -989,18 +1102,24 @@ background_var_coef_02,s,h,"{bkg_var_n} {bkg_var_unit} {bkg_var_type}",,,"Time v
 
 
 class CatSPI:
-    def __init__(self, cat_path=None, cat_ext='SPI.-SRCL-CAT'):
+    def __init__(self, cat_path=None, cat_ext='SPI.-SRCL-CAT', uint=True):
         self.cat_path = cat_path
         self.cat_ext = cat_ext
-        self.hdul = fits.open(cat_path, uint=False)
+        self.hdul = fits.open(cat_path, uint=uint)
         cat_hdu = self.hdul[cat_ext]
         self.header = cat_hdu.header
         self.table = cat_hdu.data
+        self.new_table = None
 
     @staticmethod
     def _norm_name(x):
         return x.decode("utf-8", errors="ignore").strip() if isinstance(x, (bytes, np.bytes_)) else str(x).strip()
 
+    @staticmethod
+    def _fits_str(value, sample):
+        if isinstance(sample, (bytes, np.bytes_)):
+            return value.encode("utf-8")
+        return value
 
     def find_nearby_sources(self, target, max_angle=20, flux_col = 'FLUX_CRAB_LB', flux_element= 0,
                      ra_colname = "RA_OBJ", dec_colname = "DEC_OBJ"):
@@ -1012,57 +1131,81 @@ class CatSPI:
         mask = sep_deg <= max_angle
         sel_idx = np.where(mask)[0]
 
-        # Flux value used for sorting (vector column element or scalar column)
-        flux_data = self.table[flux_col]
-        flux_val = flux_data[sel_idx, flux_element]
+        has_flux_col = flux_col in self.table.names
+        if has_flux_col:
+            # Flux value used for sorting (vector column element or scalar column)
+            flux_data = self.table[flux_col]
+            flux_val = flux_data[sel_idx, flux_element]
 
-        # Sort by flux element
-        order = np.argsort(flux_val)[::-1]
-        sel_idx = sel_idx[order]
-        flux_val = flux_val[order]
+            # Sort by flux element
+            order = np.argsort(flux_val)[::-1]
+            sel_idx = sel_idx[order]
+            flux_val = flux_val[order]
+        else:
+            # If flux is unavailable, keep deterministic ordering by source separation.
+            order = np.argsort(sep_deg[sel_idx])
+            sel_idx = sel_idx[order]
 
         sources_table = pd.DataFrame({
             "NAME": [self._norm_name(v) for v in self.table["NAME"][sel_idx]],
             ra_colname: self.table[ra_colname][sel_idx],
             dec_colname: self.table[dec_colname][sel_idx],
             "SEP_DEG": sep_deg[sel_idx],
-            f"{flux_col}[{flux_element}]": flux_val,
         })
-        print(f'Found {len(sources_table)} sources in catalog within {max_angle}° of target sources (RA={target.ra.value:.2f}, Dec={target.dec.value:.2f})')
+        # if has_flux_col:
+        #     sources_table[f"{flux_col}[{flux_element}]"] = flux_val
+        print(f'Found {len(sources_table)} sources in catalog within {max_angle}° of target sources (RA={target.ra.value:.2f}°, Dec={target.dec.value:.2f}°)')
         sources_table.reset_index(drop=True, inplace=True)
-        sources_table[f"FLUX (mCrab)"] = sources_table[f"{flux_col}[{flux_element}]"] * 1e3
+        if has_flux_col:
+            sources_table[f"Flux (mCrab)"] = flux_val * 1e3
         return sources_table
     
+
+    def select_src(self, list_src, save_dir=None, save_name='nearby_cat.fits'):
+        '''make a new catalog restricted to a list of sources'''
+        cat_names = np.array([self._norm_name(n) for n in self.table["NAME"]])
+        self.new_table = self.table[np.isin(cat_names, list_src)]
+
+        if save_dir is not None:
+            # copy HDUL and change cat table to save to new FITS
+            self.new_hdul = self.hdul.copy()
+            self.new_hdul[self.cat_ext].data = self.new_table
+            # new_hdus = [new_cat_hdu if hdu.name == "SPI.-SRCL-CAT" else hdu.copy() for hdu in self.hdul]
+            new_cat_path = f"{new_cat_path}/{save_name}"
+            fits.HDUList(self.new_hdul).writeto(new_cat_path, overwrite=True)
+            print(f'New cat written at {new_cat_path}')
+        return self.new_table
+
     def update_src_params(self, all_src_dico: dict):
         '''
         update many parameters of many sources
         all_src_dico should contain a dico for each src name with parameter name and value inside 
         '''
+        if self.new_table is None:
+            self.new_table = self.table.copy()
+
         for src in all_src_dico.keys():
             src_dico = all_src_dico[src]
-            if src in self.table.NAME:
+            if src in self.new_table.NAME:
                 for par_key in src_dico.keys():
-                    self.table[self.table.NAME == src][par_key] = src_dico[par_key]
+                    self.new_table[par_key][self.new_table.NAME == src] = src_dico[par_key]
+            else:
+                print(f'Cannot change parameters of {src} (not found in new cat table).')
+    
+    def save_cat(self, new_cat_path, overwrite=True):
+        '''create a new catalog using the modified new_table'''
+        # some columns to remove
+        flux_col_list = ['FLUX_LB', 'FLUX_CRAB_LB']
 
-
-    def select_src(self, list_src, save_dir=None, save_name='nearby_cat.fits'):
-        '''make a new catalog restricted to a list of sources'''
-        cat_names = np.array([self._norm_name(n) for n in self.table["NAME"]])
-        new_table = self.table[np.isin(cat_names, list_src)]
-
-        if save_dir is not None:
-            # copy HDUL and change cat table to save to new FITS
-            new_hdul = self.hdul.copy()
-            new_hdul[self.cat_ext].data = new_table
-            # new_hdus = [new_cat_hdu if hdu.name == "SPI.-SRCL-CAT" else hdu.copy() for hdu in self.hdul]
-            new_cat_path = f"{new_cat_path}/{save_name}"
-            fits.HDUList(new_hdul).writeto(new_cat_path, overwrite=True)
-            print(f'New cat written at {new_cat_path}')
-
-        return new_table
-
-
-        
+        self.new_hdul = self.hdul.copy()
+        self.new_hdul[self.cat_ext].data = self.new_table
+        tab = Table(self.new_hdul[self.cat_ext].data)
+        # I suspect some extra columns can make spimodfit crash
+        for flux_col in flux_col_list:
+            if flux_col in tab.columns:
+                tab.remove_columns(flux_col)
+        self.new_hdul[self.cat_ext] = fits.BinTableHDU(tab, header=self.new_hdul[self.cat_ext].header)
+        self.new_hdul.writeto(new_cat_path, overwrite=overwrite)
 
     def add_src(self, src_dico, confusion_angle=1, ref_src_name = 'Crab'):
         '''
@@ -1071,5 +1214,4 @@ class CatSPI:
         for parameters not found in the src_dico, a reference row with ref_src_name is used.
         '''
         pass
-
 

@@ -3,6 +3,7 @@ Module for quick spectral analysis
 Based off comibis
 """
 import numpy as np
+from scipy import stats
 import pandas as pd
 import matplotlib.pyplot as plt
 import lmfit as lm
@@ -12,7 +13,7 @@ from astropy.table import Table
 from matplotlib.ticker import LogFormatter
 
 import matplotlib as mpl
-mpl.rcParams.update(mpl.rcParamsDefault) # prevents 3ML from changing plt style
+# mpl.rcParams.update(mpl.rcParamsDefault) # prevents 3ML from changing plt style
 mpl.rcParams['axes.labelsize'] = 16
 mpl.rcParams['axes.titlesize'] = 16
 mpl.rcParams['xtick.labelsize'] = 15
@@ -25,9 +26,30 @@ from .spec_model import *
 
 kev_to_erg = 1.60218e-9  # erg/keV
 # dico containing the units, multiplicative factors and energy exponents (ex: F(erg/s/cm2) = keV_to_erg * F**2)
-spec_dico = {'RATE':[r'Count s$^{-1}$ keV$^{-1}$',1,0], 'FLUX':[r'ph cm$^{-2}$ s$^{-1}$ keV$^{-1}$',1,0], 'EFLUX':[r'ph cm$^{-2}$ s$^{-1}$',1,1],
-             'EEFLUX':[r'keV cm$^{-2}$ s$^{-1}$',1,2], 'ERG':[r'erg cm$^{-2}$ s$^{-1}$',kev_to_erg,2]}
-res_dico = {'RES':[0,r'$\sigma$'],'REDCHI2':[1,r'$\chi^2_{red}$']}
+spec_dico = {'RATE':[r'Count s$^{-1}$ keV$^{-1}$',1,0],
+             'FLUX':[r'ph cm$^{-2}$ s$^{-1}$ keV$^{-1}$',1,0],
+             'EFLUX':[r'ph cm$^{-2}$ s$^{-1}$',1,1],
+             'EEFLUX':[r'keV cm$^{-2}$ s$^{-1}$',1,2],
+             'ERG':[r'erg cm$^{-2}$ s$^{-1}$',kev_to_erg,2]
+             }
+res_dico = {'RES':[0,r'$\sigma$'],
+            'REDCHI2':[1,r'$\chi^2_{red}$']}
+
+############### Timing testing ###############
+
+from time import time
+import functools
+
+def timer(func):
+    '''add @timer before function call to print computation time'''
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        start = time()
+        result = func(*args, **kwargs)
+        elapsed = time() - start
+        print(f"{func.__name__} took {elapsed:.3f}s")
+        return result
+    return wrapper
 
 ############### Classes ###############
 
@@ -45,7 +67,7 @@ class Response:
         self.rmf_ext = hdul_rmf[rmf_matrix_ext].data
         self.rmf_ebd = hdul_rmf[rmf_ebound_ext].data
         # sometimes RMF probability table is stored with varying row sizes
-        # implying the actual matrix is triangular
+        # implying the lower right (below photo-peak energies) is filled with 0s
         if isinstance(self.rmf_ext[rmf_table_name], fits.column._VLF):
             _n_J = len(self.rmf_ext['ENERG_LO'])
             _n_I = len(self.rmf_ebd['E_MIN'])
@@ -59,10 +81,11 @@ class Response:
         self.dI = self.rmf_ebd['E_MAX'] - self.rmf_ebd['E_MIN']
         self.J = (self.rmf_ext['ENERG_HI'] + self.rmf_ext['ENERG_LO'])/2
         self.dJ = self.rmf_ext['ENERG_HI'] - self.rmf_ext['ENERG_LO']
-        print(f'Imported response with ({len(self.J)}x{len(self.I)}) channels (N_true x N_detected).')
+        print(f'Imported response with (N_true x N_detected) = ({len(self.J)}x{len(self.I)}) channels.')
+        
         # ARF (cm2) as a function of channel (J)
         if arf_name is None:
-            # for some instruments like SPI, the effective area is included in the RMF
+            # for some instruments like SPI, the effective area is included in the flux directly
             self.arf_file_name = None
             self.arf = np.ones(shape = len(self.J))
         else:
@@ -70,20 +93,31 @@ class Response:
             hdul_arf = fits.open(f'{self.arf_file_name}')
             self.arf = hdul_arf[1].data['SPECRESP']
 
+        # create an effective response matrix with the energy bin sizes and effective area included
+        self.rmf_eff = self.dJ[:, np.newaxis] * self.arf[:, np.newaxis] * self.rmf_mat / self.dI[np.newaxis, :]
+
     def make_rbn_mat(self, E_bounds_rbn):
-        '''creates a bool matrix that tells if channel I is inside [Ei, Ei+1] of Compton spec'''
+        '''creates a bool matrix that tells if channel I is inside [Ei, Ei+1] of spec'''
         self.rbn_IE_matrix = np.array([(self.I>erbn[0])&(self.I<=erbn[1]) for erbn in E_bounds_rbn]).T
         # return self.rbn_IE_matrix
     
-    def plot_rmf(self, vmax=4e-3, cmap='magma', interpolation='none'):
+    def plot_rmf(self, vmax=1e-2, cmap='magma', interpolation='none', effective_rmf=True):
         I_min, I_max, J_min, J_max = self.I[0], self.I[-1], self.J[0], self.J[-1]
+        if effective_rmf: mat = self.rmf_eff
+        else: mat = self.rmf_mat
+
         fig, ax= plt.subplots(1,1,figsize=(10,8))
-        cb=ax.imshow(self.rmf_mat, extent=[I_min, I_max, J_min, J_max ],
+        im=ax.imshow(mat, extent=[I_min, I_max, J_min, J_max ],
                     origin='lower', aspect= (I_min - I_max)/(J_min - J_max), vmax=vmax, cmap=cmap, interpolation=interpolation)
+        cb = fig.colorbar(im, ax=ax)
+        if vmax is None:
+            if effective_rmf: # to check
+                cb.set_label(r'cm$^2$ keV$^{-1}$')
+            else:
+                cb.set_label(r'keV$^{-1}$')
         ax.set_xlabel('Reconstructed Energy (keV)')
         ax.set_ylabel('True Energy (keV)')
-        plt.colorbar(cb)
-        return ax
+        return ax, cb
     
     def plot_arf(self, color='k'):
         fig, ax= plt.subplots(1,1,figsize=(8,6))
@@ -113,6 +147,13 @@ class Spectrum:
         if spec_sys_error is not None:
             self.rate_err = np.sqrt(self.rate_err**2 + (spec_sys_error * self.rate)**2)
 
+        # non-detection defined as error bar compatible with 0 
+        self.uplims_mask = (self.rate - self.rate_err < 0.)
+
+    def find_upperlim(self):
+        pass
+        # uplim_factor = stats.norm.ppf(cl)
+
     def make_fit_ebd(self, e_min_fit, e_max_fit):
         self.E_bds_mask = (self.E >= e_min_fit) & (self.E <= e_max_fit) # bool vector to select E bounds for fit
     
@@ -123,7 +164,10 @@ class Spectrum:
         '''
         self.E_bds_mask = np.ones_like(self.E) # bool vector to select E bounds for fit
         for (emin, emax) in ebds_list:
-            self.E_bds_mask |= (self.E >= emin) & (self.E <= emax) 
+            self.E_bds_mask |= (self.E >= emin) & (self.E <= emax)
+
+    # def select_chan_list(self, chan_list):
+    #     self.E_bds_mask
         
     def plot_raw_spec(self, logscale=True, figsize=(8,6)):
         fig, ax = plt.subplots(1, 1, figsize=figsize)
@@ -159,9 +203,10 @@ class Fit:
         self.model = SPEC_MODELS[model_name]
 
     def calc_rate(self, resp: Response):
-        '''convert model flux spec into rates with the response'''
+        '''convert model flux spec into rates with the effective response'''
         model_flux = self.model.calc(resp.J, self.model_parameters) # flux (ph/cm2/s/keV) is always calculated using the RMF energies (J)
-        self.rate = ((model_flux * resp.dJ * resp.arf)@resp.rmf_mat / resp.dI) # conversion flux->count/s with instrument response (RMF+ARF) and energy bin size (rmf_dI, rmf_dJ)
+        self.rate = model_flux @ resp.rmf_eff # conversion flux->count/s with instrument response (RMF+ARF) and energy bin size (rmf_dI, rmf_dJ)
+        # self.rate = ((model_flux * resp.dJ * resp.arf)@resp.rmf_mat / resp.dI) # conversion flux->count/s with instrument response (RMF+ARF) and energy bin size (rmf_dI, rmf_dJ)
         return self.rate
     
     def calc_residual(self, fit_params, spectrum: Spectrum, resp: Response):
@@ -178,6 +223,7 @@ class Fit:
         self.model_spec_rbn = self.calc_rate(resp) * resp.dI @ resp.rbn_IE_matrix / spectrum.dE # model rate and matrix re-binning operation
         return ((self.model_spec_rbn - spectrum.rate) / spectrum.rate_err)[spectrum.E_bds_mask] # the length of this array will be used for the reduced chi2
 
+    @timer
     def fit_spec(self, spectrum: Spectrum, resp: Response, lmfit_params, e_min_fit=None, e_max_fit=None):
         '''fit the spectrum with model and response'''
         spectrum.make_fit_ebd(e_min_fit, e_max_fit)
@@ -186,6 +232,9 @@ class Fit:
         self.make_JE_rebin_mat(resp, spectrum)
         self.make_model_df(result, resp)
         self.make_spec_df(resp, result, spectrum)
+        p_value = stats.chi2.sf(result.chisqr, result.nfree)   # equivalent to 1 - chi2.cdf(...)
+        self.result = result
+        print(f'P-value of chi2 = {p_value*100:.2f} %')
         return result, minner
 
     def make_JE_rebin_mat(self, resp: Response, data: Spectrum, plot=False):
@@ -202,21 +251,28 @@ class Fit:
         self.model_parameters = result.params # update params after fit
         self.df_model =  pd.DataFrame({'E':resp.I, 'E_ERR':resp.dI/2, 'RATE':self.calc_rate(resp)})
         self.df_model['FLUX'] = self.model.calc(resp.I, self.model_parameters)
-        # self.df_spec['FLUX'] = calc_model_flux(resp.I, self.model_parameters, self.model_name)
+        for spec_type in spec_dico.keys():
+            spec_type_param = spec_dico[spec_type]
+            self.df_model[spec_type] = spec_type_param[1] * self.df_model['FLUX'] * (self.df_model['E']**spec_type_param[2])
     
 
     def make_spec_df(self, resp: Response, result, spectrum: Spectrum):
         '''
         create df with all data spectrum related info
-        compute the flux (in ph/s/cm2/keV) of Compton spec from the count-rate
+        compute the flux (in ph/s/cm2/keV) of spectrum from the count-rate
         this is done by estimating the inverse response: Cm = Fm * R => R^-1 = Fm / Cm, where Fm and Cm are the flux and count-rate of the model
         '''
-        self.df_spec = pd.DataFrame({'E':spectrum.E, 'E_ERR':spectrum.dE/2, 'RATE':spectrum.rate, 'RATE_ERR':spectrum.rate_err})
+        self.df_spec = pd.DataFrame({'E':spectrum.E, 'E_ERR':spectrum.dE/2, 'RATE':spectrum.rate, 'RATE_ERR':spectrum.rate_err, 'UPLIMS':spectrum.uplims_mask})
         model_rate = self.rate # predicted count-rate (ct/s/keV)
         model_flux = self.model.calc(resp.J, result.params) * resp.dJ @ self.rbn_JE_matrix / spectrum.dE # predicted flux (ph/s/cm2/keV)
         flux_rate_ratio = model_flux/model_rate #  equivalent to an inverse response (~ ph/ct)
         self.df_spec['FLUX'] = flux_rate_ratio * self.df_spec.RATE # ph/s/cm2/keV
-        self.df_spec['FLUX_ERR'] = flux_rate_ratio *  self.df_spec.RATE_ERR 
+        self.df_spec['FLUX_ERR'] = flux_rate_ratio *  self.df_spec.RATE_ERR
+        # compute all types of flux available (E*F, E^2*F, erg/s/cmZ)
+        for spec_type in spec_dico.keys():
+            spec_type_param = spec_dico[spec_type]
+            self.df_spec[spec_type] = spec_type_param[1] * self.df_spec['FLUX'] * (self.df_spec['E']**spec_type_param[2])
+            self.df_spec[f'{spec_type}_ERR'] = spec_type_param[1] * self.df_spec['FLUX_ERR'] * (self.df_spec['E']**spec_type_param[2])
 
         # create another df only inside the fit energy bounds
         self.df_spec_fit = self.df_spec[spectrum.E_bds_mask].copy()
@@ -231,7 +287,7 @@ class Fit:
             return 1
     
 
-    def rebin_spec_fact(self, rebin_fact=5, rbn_type= 'linear'):
+    def rebin_spec_fact(self, rebin_fact=5, rbn_type= 'linear', spec_type='RATE'):
         ''' rebin the spectrum by grouping channels to obtain N/rebin_fact channels
             linear: group rebin_fact adjacent, log: group on log scale to have larger grouping towards higher energies
             returns a df with the same unit for RATE (here dE = 2 * E_ERR)
@@ -240,8 +296,11 @@ class Fit:
         if rbn_type=='log':  self.df_model['RBN'] = np.int64(np.logspace(np.log10(len(self.df_model)//rebin_fact), 0, len(self.df_model)))
         group_rbn = self.df_model.groupby('RBN') # group df by re-binning number
         group_rbn_sum, group_rbn_mean = group_rbn.sum(), group_rbn.mean()
-        return pd.DataFrame({'E':group_rbn_mean.E, 'E_ERR':group_rbn_sum.E_ERR, 'RATE':group_rbn_sum.RATE/(2 * group_rbn_sum.E_ERR),
-                'FLUX':group_rbn_sum.FLUX/(2 * group_rbn_sum.E_ERR)})
+        # df_rebin = pd.DataFrame({'E':group_rbn_mean.E, 'E_ERR':group_rbn_sum.E_ERR, 'RATE':group_rbn_sum.RATE/(2 * group_rbn_sum.E_ERR),
+        #         'FLUX':group_rbn_sum.FLUX/(2 * group_rbn_sum.E_ERR)})
+        df_rebin = pd.DataFrame({'E':group_rbn_mean.E, 'E_ERR':group_rbn_sum.E_ERR})
+        df_rebin[spec_type] = group_rbn_sum[spec_type]/(2 * group_rbn_sum.E_ERR)
+        return df_rebin
     
     def calc_flux_model(self, e_flux_min, e_flux_max, flux_type='eeuf', N_flux_bin=100, verbose=1):
         '''sum (uf) model over a given energy band to obtain the flux
@@ -255,11 +314,16 @@ class Fit:
         if verbose:
             print('flux in {} - {} keV: {:.2e} erg/cm2/s , {:.2e} ph/cm2/s'.format(e_flux_min, e_flux_max, f_dico['eeuf'],f_dico['euf']))
         return f_dico[flux_type]
-    
+
+    @staticmethod
+    def find_up_lim(f, sigma, uplim_factor):
+        '''upper-limits in gaussian stat'''
+        return f + uplim_factor * sigma
 
 ############### Fit functions ###############
 
-    def plot_fit(self, e_min_fit, e_max_fit, spec_type='RATE', res_type='RES', rebin_fact_model=False, rbn_type='log', yscale=None):
+    def plot_fit(self, e_min_fit, e_max_fit, spec_type='RATE', res_type='RES', rebin_fact_model=False, rbn_type='log',
+                 yscale='log', xscale='log', show_uplim=True, uplim_proba=.95, with_hertz=False):
         '''
         spec_type: 'RATE' (cts/s/kev), 'FLUX' (ph/s/cm2/kev), 'EFLUX' (ph/s/cm2), 'EEFLUX' (kev/s/cm2), 'ERG' (erg/s/cm2)
 
@@ -273,28 +337,49 @@ class Fit:
         if rebin_fact_model: df_spec_model = self.rebin_spec_fact(rebin_fact_model, rbn_type)
         else: df_spec_model = self.df_model
         df_spec_model_fit = df_spec_model[(df_spec_model.E>e_min_fit)&(df_spec_model.E<e_max_fit)].copy()
-        df_spec_compton_fit = self.df_spec_fit
 
-        spec_type_param = spec_dico[spec_type]
+
         fig, axes = plt.subplots(1+show_residuals, 1, figsize=(9,7), height_ratios=[2,1]*show_residuals+[1]*(1-show_residuals), squeeze=False) # squeeze=0 makes it an array
-        if spec_type=='RATE': 
-            axes[0,0].plot('E', spec_type, 'r', label='Best fit', data=df_spec_model_fit)
-            axes[0,0].errorbar(x='E', xerr='E_ERR', y=spec_type, yerr=spec_type+'_ERR', fmt='k.', label='Data spectrum', data=df_spec_compton_fit)
+        # Model
+        axes[0,0].plot('E', spec_type, 'r', label='Best fit', data=df_spec_model_fit)
+        
+        # Data
+        if show_uplim:
+            # Gaussian upper-limit approximation
+            uplim_factor = stats.norm.ppf(uplim_proba)
+            uplims_mask = self.df_spec_fit.UPLIMS
+            # everything being linear with RATE, the upper-limit formula can be used directly on the different flux type, without using RATE
+            self.df_spec_fit[f'{spec_type}_uplim'] = self.df_spec_fit.apply(
+                lambda x:x[spec_type] + uplim_factor * x[spec_type+'_ERR'], axis=1
+                )
+            axes[0,0].errorbar(x='E', xerr='E_ERR', y=spec_type, yerr=spec_type+'_ERR', fmt='k.', label='Data spectrum', data=self.df_spec_fit[~uplims_mask])
+            axes[0,0].errorbar(x='E', xerr='E_ERR', y=f'{spec_type}_uplim', fmt='kv',
+                               label=f'Upper-limits ({uplim_proba*100:g}%)', data=self.df_spec_fit[uplims_mask], uplims=True)
         else:
-            axes[0,0].plot(df_spec_model_fit.E, spec_type_param[1] * df_spec_model_fit['FLUX'] * (df_spec_model_fit.E**spec_type_param[2]), 'r', label='Best fit')
-            axes[0,0].errorbar(x = df_spec_compton_fit.E, xerr = df_spec_compton_fit.E_ERR, \
-                            y = spec_type_param[1] * df_spec_compton_fit['FLUX'] * (df_spec_compton_fit['E']**spec_type_param[2]), \
-                            yerr = spec_type_param[1] * df_spec_compton_fit['FLUX_ERR'] * (df_spec_compton_fit['E']**spec_type_param[2]),\
-                            fmt='k.', label='Data spectrum')
-        axes[0,0].set_yscale('log');axes[0,0].legend();axes[0,0].set_ylabel(spec_dico[spec_type][0]);axes[0,0].set_xscale('log')
-        if yscale:
-            axes[0,0].set_ylim(yscale[0],yscale[1])
+            axes[0,0].errorbar(x='E', xerr='E_ERR', y=spec_type, yerr=spec_type+'_ERR', fmt='k.', label='Data spectrum', data=self.df_spec_fit)
+
+        axes[0,0].set_ylabel(spec_dico[spec_type][0])
+        # add axis at the top with frequency in Herz
+        if with_hertz:
+            kev_to_hertz = lambda x: x * 2.4179e17
+            hertz_to_kev = lambda x: x / 2.4179e17
+            secax = axes[0,0].secondary_xaxis('top', functions=(kev_to_hertz, hertz_to_kev))
+            secax.set_xlabel(r"$\nu$ (Hz)")
+
         if show_residuals:
-            axes[0,0].set_xticklabels([])
             axes[0,0].set_xticklabels([],minor=True) # remove energy label for minor and major ticks
-            axes[1,0].errorbar(x='E', xerr='E_ERR', y=res_type, yerr=res_type+'_ERR', fmt='k.', data=df_spec_compton_fit)
+            axes[1,0].errorbar(x='E', xerr='E_ERR', y=res_type, yerr=res_type+'_ERR', fmt='k.', data=self.df_spec_fit)
             axes[1,0].axhline(res_dico[res_type][0], color='grey', linestyle='--')
-            axes[1,0].set_ylabel(res_dico[res_type][1]);axes[1,0].set_xscale('log')
+            # make y-axis symmetric around 0
+            ymin, ymax = axes[1,0].get_ylim()
+            m = max(abs(ymin), abs(ymax))
+            axes[1,0].set_ylim(-m, m)
+            axes[1,0].set_ylabel(res_dico[res_type][1])
+        
+        for ax in axes.flatten():
+            ax.set_xscale(xscale)
+        axes[0,0].set_yscale(yscale)
+        axes[0,0].legend()
         # to show the energies on (some) minor ticks, and with the full numbers instead of power of 10
         formatter = LogFormatter(labelOnlyBase=False)
         axes[show_residuals,0].xaxis.set_minor_formatter(formatter)

@@ -25,7 +25,7 @@ class Constant(Model):
 class PowerLaw(Model):
     '''Power-law with index = -gamma)'''
     def calc(self, E, par):
-        return par['K'] * E**(-par['gamma'])
+        return par['K'] * (E / par['Epiv'])**(-par['gamma'])
     
 class PowerLawFlux(Model):
     '''Variant of power-law model, where K is the integrated flux between e1 and e2, in ph/cm2/s'''

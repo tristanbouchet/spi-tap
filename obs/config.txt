@@ -1,9 +1,20 @@
-spi_cat_path, /home/tbouchet/cat/spi_cat_2023.fits
+# this file stores paths to config files. each of them is imported as arguments of the ObsSPI class.
+
+# catalogs
+spi_cat_path, /home/tbouchet/cat/spi_cat_LB_spimodfit_flux.fits
+gnrl_cat_path, /home/tbouchet/cat/nrt_cat_tristan.fits
+
+# config/calib
 data_dir, /mnt/kiwi/INTEGRAL/Private_low
 scw_db_path, /home/tbouchet/ScwDB_0016-2887_reduced_filterGTI.fits.gz
-gnrl_cat_path, /home/tbouchet/cat/nrt_cat_tristan.fits
 all_revs_path, /data1/ipp_afs_mirror/integral/shared_analysis/cookbook/revolutions/all_revs.fits
 bkg_db_dir, /home/tbouchet/BKG_DB
-rmfgen_path, /data1/ipp_afs_mirror/osa-10.0/linux64_sw-10.0/bin
 inRMFfile, /data1/ipp_afs_mirror/integral/data/ic/current/ic/spi/rsp/spi_rmf_grp_0002.fits
 cfitsio_templates_dir,  /data1/ipp_afs_mirror/integral/software/osa/osa-10.0/linux64_sw-10.0/templates
+spi_off_det, /data1/ipp_afs_mirror/integral/software/local/spiselectscw/current/spi_off_det.fits
+spi_gnrl_bti, /data1/ipp_afs_mirror/integral/data/ic/spi/lim/spi_gnrl_bti_0005.fits
+
+# commands
+spiselectscw_cmd, /data1/ipp_afs_mirror/integral/software/local/spiselectscw/4.02/amd64_sles11_g++/spiselectscw
+spimodfit_cmd, /data1/ipp_afs_mirror/integral/software/local/spimodfit/3.2/amd64_sles11_g++/spimodfit
+rmfgen_cmd, /data1/ipp_afs_mirror/osa-10.0/linux64_sw-10.0/bin/spirmf
