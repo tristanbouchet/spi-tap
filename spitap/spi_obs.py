@@ -177,7 +177,7 @@ class ObsSPI:
         self.rev_dates_df = pd.DataFrame({'REV':hdul[1].data['REVOLUTION'],
                       'IJD_START':hdul[1].data['TIME_PERIGEE'].astype(np.float64)
                       })
-        self.rev_dates_df['MJD_START'] = self.MJDREF + self.rev_dates.IJD_START
+        self.rev_dates_df['MJD_START'] = self.MJDREF + self.rev_dates_df.IJD_START
         self.rev_dates_df['DATE_START'] = self.rev_dates_df.MJD_START.apply(mjd_to_isot)
         return self.rev_dates_df
 
@@ -289,8 +289,11 @@ class ObsSPI:
                     time.sleep(0.5)
                 
                 log.write(f"\n{socket.gethostname()} {datetime.now()}\n")
-            
-            print(f"\nCommand completed with exit status: {process.returncode}")
+
+            if process.returncode == 0:
+                print(f"\n{GREEN}Command completed with exit status: {process.returncode}{RESET}")
+            else:
+                print(f"\n{RED}Command completed with exit status: {process.returncode}{RESET}")
             print(f"Output logged to {logfile}")
             return process.returncode
         
@@ -299,6 +302,20 @@ class ObsSPI:
             return False
         
     ########## Source ##########
+
+    def find_gnrl_cat_coord(self, full_name):
+        hdul = fits.open(self.gnrl_cat_path)
+        gnrl_cat_table = hdul[self.gnrl_cat_ext].data
+        gnrl_cat_select = gnrl_cat_table[gnrl_cat_table['NAME'] == full_name]
+        if len(gnrl_cat_select) > 0:
+            print(f'{GREEN}Source {full_name} found in general catalog.{RESET}')
+            source_info = gnrl_cat_select[0]
+            ra, dec = source_info['RA_OBJ'], source_info['DEC_OBJ']
+            print(f'Coordinates RA={ra:.2f}° Dec={dec:.2f}°')
+        else:
+            print(full_name,' was not found in cat!')
+        return ra, dec
+
 
     def setup_source(self, src_dir, full_name=None, ra=None, dec=None):
         """Setup source directory with provided source information"""
@@ -319,6 +336,10 @@ class ObsSPI:
         else:
             print('Creating new source directory...')
             os.mkdir(f'{self.main_dir}/{src_dir}')
+
+        # if only full name is given, check general catalog for ra/dec
+        if full_name is not None and ra is None:
+            ra, dec = self.find_gnrl_cat_coord(full_name)
         
         os.chdir(f'{self.main_dir}/{src_dir}')
         
@@ -356,21 +377,25 @@ class ObsSPI:
             except FileNotFoundError:
                 pass
         
+        # if full_name is None:
+        #     hdul = fits.open(self.gnrl_cat_path)
+        #     gnrl_cat_table = hdul[self.gnrl_cat_ext].data
+        #     full_name = self.query('* Full name of the source?\n', default_key ='full_name')
+        #     gnrl_cat_select = gnrl_cat_table[gnrl_cat_table['NAME'] == full_name]
+        #     if len(gnrl_cat_select) > 0:
+        #         print(f'Source {full_name} found in general catalog.')
+        #         source_info = gnrl_cat_select[0]
+        #         ra, dec = source_info['RA_OBJ'], source_info['DEC_OBJ']
+        #         print(f'Coordinates RA={ra:.2f}° Dec={dec:.2f}°')
+        #     else:
+        #         print(full_name,' was not found in cat!')
         if full_name is None:
-            hdul = fits.open(self.gnrl_cat_path)
-            gnrl_cat_table = hdul[self.gnrl_cat_ext].data
             full_name = self.query('* Full name of the source?\n', default_key ='full_name')
-            gnrl_cat_select = gnrl_cat_table[gnrl_cat_table['NAME'] == full_name]
-            if len(gnrl_cat_select) > 0:
-                print('Source found in general catalog.')
-                source_info = gnrl_cat_select[0]
-                ra, dec = source_info['RA_OBJ'], source_info['DEC_OBJ']
-                print(f'Coordinates RA={ra:.2f}° Dec={dec:.2f}°')
-            else:
-                print(full_name,' was not found in cat!')
-                print('* Enter RA/DEC coordinate directly\n')
-                ra = np.float32(input('RA?'))
-                dec = np.float32(input('Dec?'))
+            ra, dec = self.find_gnrl_cat_coord(full_name)
+        if ra is None:
+            print('* Enter RA/DEC coordinate directly\n')
+            ra = np.float32(input('RA?'))
+            dec = np.float32(input('Dec?'))
         
         self.setup_source(src_dir, full_name, ra, dec)
 
@@ -775,14 +800,16 @@ out_expo_map_dol,s,h,"expo.fits",,,"Name of the output exposure map. None if lef
         arr[0] = n
         return arr
         
-    def select_src_var(self, main_src_var_unit, main_src_var_n, main_src_var_type):
+    def select_src_var(self, main_src_var_unit, main_src_var_n, main_src_var_type, src_name=None):
         '''
         modify the variability in the catalog using keywords: VAR_MODL, VAR_NPAR, VAR_PARS (array)
         variability unit can be p(ointing) or d(ays) and is converted using a dico into correct catalog value
-        increment number (main_src_var_n) is converted into an array for VAR_PARS
-        for simplicity, VAR_NPAR is always 1
+
+        by default (src_name=None) the main analysis source is used.
         '''
         self.all_src_dico= {}
+        if src_name is None:
+            src_name = self.full_name
         if main_src_var_type == 'i':
             npar = int(1)
             par_array = self.convert_var_n_array(main_src_var_n, self.cat.new_table['VAR_PARS'].shape[1])
@@ -794,7 +821,7 @@ out_expo_map_dol,s,h,"expo.fits",,,"Name of the output exposure map. None if lef
             raise NotImplementedError(main_src_var_type)
 
 
-        self.all_src_dico[self.full_name] = {
+        self.all_src_dico[src_name] = {
             'VAR_MODL':self.VAR_UNIT_CONVERSION[main_src_var_unit+main_src_var_type],
             'VAR_NPAR':npar,
             'VAR_PARS':par_array
@@ -854,7 +881,7 @@ out_expo_map_dol,s,h,"expo.fits",,,"Name of the output exposure map. None if lef
     
     def make_spimodfit_par(self, src_var_n=0, src_var_unit='d', src_var_type='n', src_max_angle=None,
                            bkg_var_n=1, bkg_var_unit='d', bkg_var_type='i', fov_cat_path=None, overwrite_fov_cat= True,
-                           skip_spimodfit_exists=False):
+                           skip_spimodfit_exists=False, spimodfit_clobber=None):
         """create spimodfit parameter file"""
 
         self.run_path = f'{self.main_dir}/{self.src_dir}/{self.date_dir}/{self.ener_dir}'
@@ -956,8 +983,8 @@ background_var_coef_02,s,h,"{bkg_var_n} {bkg_var_unit} {bkg_var_type}",,,"Time v
                 f_out.write(combined_content)
             
             print(f'Parameter file created: {output_par_file}')
-            self.spimodfit_return_code = self.run_spimodfit(self.fit_dir, clobber=None)
-
+            self.spimodfit_return_code = self.run_spimodfit(self.fit_dir, clobber=spimodfit_clobber)
+            print(f'Fit directory at {self.spec_path}')
             if self.spimodfit_return_code != 0:
                 print(f'spimodfit failed to complete (Error code {self.spimodfit_return_code}).')
                 print(f'Check log file {os.getcwd()}/spimodfit.log')
@@ -966,6 +993,81 @@ background_var_coef_02,s,h,"{bkg_var_n} {bkg_var_unit} {bkg_var_type}",,,"Time v
             else:
                 N_src_spec= len(glob.glob('spectra_*'))
                 print(f'spimodfit ran successfully. {N_src_spec} spectra created.')
+
+    def run_analysis_noninteractive(
+        self,
+        src_dir,
+        full_name,
+        ra,
+        dec,
+        date_start,
+        date_end,
+        off_angle,
+        evt_type,
+        binning_type,
+        emin=None,
+        emax=None,
+        nbins=None,
+        e_channels_bounds=None,
+        e_channels_scales=None,
+        overwrite_date_dir=None,
+        skip_spiselectscw_par=False,
+        zenith_angle=10,
+        src_sel=None,
+        main_src_var_unit='d',
+        main_src_var_n='1',
+        main_src_var_type='i',
+        src_var_n='0',
+        src_var_unit='d',
+        src_var_type='n',
+        bkg_var_n='1',
+        bkg_var_unit='d',
+        bkg_var_type='i',
+        spimodfit_clobber=None,
+        analyze_spimodfit_result=True,
+        generate_response_matrix=True,
+        response_clobber='n',
+        verbose=True,
+    ):
+        """Run the pipeline without prompts. If src_sel is None, stop after nearby source list."""
+        self.setup_source(src_dir=src_dir, full_name=full_name, ra=ra, dec=dec)
+        self.select_observations(date_start=date_start, date_end=date_end, off_angle=off_angle, overwrite_dir=overwrite_date_dir)
+        self.setup_energies(
+            evt_type=evt_type,
+            binning_type=binning_type,
+            emin=emin,
+            emax=emax,
+            nbins=nbins,
+            e_channels_bounds=e_channels_bounds,
+            e_channels_scales=e_channels_scales,
+        )
+        self.make_spiselectscw_par(skip_spalready_exists=skip_spiselectscw_par)
+        self.process_background()
+        nearby_df = self.find_nearby(zenith_angle=zenith_angle)
+
+        if src_sel is None:
+            print('Nearby sources ready. Set src_sel and continue with select_brightest + spimodfit steps.')
+            return nearby_df
+
+        self.select_brightest(src_sel)
+        self.select_src_var(main_src_var_unit=main_src_var_unit, main_src_var_n=main_src_var_n, main_src_var_type=main_src_var_type)
+        self.make_spimodfit_par(
+            src_var_n=src_var_n,
+            src_var_unit=src_var_unit,
+            src_var_type=src_var_type,
+            src_max_angle=None,
+            bkg_var_n=bkg_var_n,
+            bkg_var_unit=bkg_var_unit,
+            bkg_var_type=bkg_var_type,
+            spimodfit_clobber=spimodfit_clobber,
+        )
+
+        if analyze_spimodfit_result:
+            self.analyze_spimodfit(verbose=verbose)
+        if generate_response_matrix:
+            self.generate_response(clobber=response_clobber)
+
+        return nearby_df
     
     
     def make_spimodfit_par_interactive(self):
@@ -1062,6 +1164,9 @@ background_var_coef_02,s,h,"{bkg_var_n} {bkg_var_unit} {bkg_var_type}",,,"Time v
         if err_code == 0:
             self.add_rmf_keywords(outRMFfile=outRMFfile)
             self.fix_spec_extensions(outRMFfile=outRMFfile)
+        else:
+            print(f'{RED}RMF generation ended with code {err_code}.{RESET}')
+            print('Try reloading the session and running again.')
 
         return err_code
     
