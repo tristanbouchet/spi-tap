@@ -5,6 +5,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+from scipy import stats
+
 from astropy.io import fits
 from astropy.table import Table
 from astropy.time import Time
@@ -18,9 +20,10 @@ def mjd_to_isot(x):
     return np.datetime64(isot.value) # convert to plot-able dates
 
 class SPIResult:
-    def __init__(self, fit_path, result_file="results.spimodfit.fits"):
+    def __init__(self, fit_path, result_file="results.spimodfit.fits", uplim_proba=.9):
         self.fit_path = fit_path
         self.result_file = result_file
+        self.uplim_proba = uplim_proba
         self.result_path = f"{fit_path}/{result_file}"
         self.hdul = fits.open(self.result_path)
 
@@ -86,6 +89,14 @@ class SPIResult:
             df['E_ERR'] = (df[f'E_MAX'] - df['E_MIN'])/2
             df['E_MID'] = (df[f'E_MAX'] + df['E_MIN'])/2
 
+            df['uplim'] = (df.FLUX_ML - df.FLUX_ERR_ML < 0.)
+            # Gaussian upper-limit approximation
+            uplim_factor = stats.norm.ppf(self.uplim_proba)
+            df[f'FLUX_UPLIM_{self.uplim_proba:g}'] = df.apply(
+                lambda x:x['FLUX_ML'] + uplim_factor * x['FLUX_ERR_ML'], axis=1
+                )
+            
+
             df_sources = df[df["PAR_TYPE"] == "Point source"].copy()
             df_bkg = df[df["PAR_TYPE"] == "Background model"].copy()
 
@@ -110,22 +121,43 @@ class SPIResult:
             return self.df_bkg.copy()
         return self.bkg_by_eb.get(energy_bin, pd.DataFrame()).copy()
 
+    
     def plot_source_lightcurves(
         self,
         energy_bin=0,
         ncols=2,
         date_type="MJD",
         figsize_per_panel=(4.5, 3.2),
+        share_dates=False,
         sharey=False,
+        show_uplim=True
     ):
+        date_type = str(date_type).upper()
         df = self.get_sources(energy_bin=energy_bin)
         if df.empty:
             raise ValueError(f"No source results found for energy bin {energy_bin}.")
-
+            
         src_names = sorted(df["NAME"].dropna().unique())
         nsrc = len(src_names)
         if nsrc == 0:
             raise ValueError("No sources available to plot.")
+
+        x_min = None
+        x_max = None
+        x_min_plot = None
+        x_max_plot = None
+        if share_dates:
+            x_min = df[f"{date_type}_START"].min()
+            x_max = df[f"{date_type}_STOP"].max()
+            x_dtype = df[f"{date_type}_MID"].dtype
+            if np.issubdtype(x_dtype, np.datetime64):
+                span = x_max - x_min
+                pad = span * 0.03 if span > pd.Timedelta(0) else pd.Timedelta(days=1)
+            else:
+                span = x_max - x_min
+                pad = span * 0.03 if span > 0 else max(abs(float(x_min)), 1.0) * 0.03
+            x_min_plot = x_min - pad
+            x_max_plot = x_max + pad
 
         nrows = math.ceil(nsrc / ncols)
         fig_w = figsize_per_panel[0] * ncols
@@ -134,15 +166,20 @@ class SPIResult:
 
         axes = np.atleast_1d(axes).ravel()
 
-        eband_label = ""
-        e_min = df["E_MIN"].iloc[0]
-        e_max = df["E_MAX"].iloc[0]
-        eband_label = f" ({e_min:g}-{e_max:g} keV)"
-
         for i, src in enumerate(src_names):
             ax = axes[i]
             sdf = df[df["NAME"] == src].copy().sort_values("IJD_START")
-            ax.errorbar(date_type+'_MID', 'FLUX_ML', xerr=date_type+'_ERR', yerr='FLUX_ERR_ML', fmt="ko", markersize=3, data=sdf)
+            if show_uplim:
+                ax.errorbar(date_type+'_MID', 'FLUX_ML', xerr=date_type+'_ERR', yerr='FLUX_ERR_ML', fmt="ko", markersize=4,
+                            data=sdf[~sdf.uplim])
+                ax.errorbar(date_type+'_MID', xerr=date_type+'_ERR', y=f'FLUX_UPLIM_{self.uplim_proba:g}', fmt='kv', markersize=6,
+                            label=f'Upper-limits ({self.uplim_proba*100:g}%)', data=sdf[sdf.uplim], uplims=True)
+                
+            else:
+                ax.errorbar(date_type+'_MID', 'FLUX_ML', xerr=date_type+'_ERR', yerr='FLUX_ERR_ML', fmt="ko", markersize=3, data=sdf)
+
+            if share_dates:
+                    ax.set_xlim(x_min_plot, x_max_plot)
 
             ax.set_title(str(src))
             if i%ncols ==0: ax.set_ylabel("Flux")
@@ -160,7 +197,9 @@ class SPIResult:
         for j in range(nsrc, len(axes)):
             axes[j].axis("off")
 
-        fig.suptitle(f"Source Light Curves - Energy bin {energy_bin}{eband_label}", y=1.02)
+        e_min = df["E_MIN"].iloc[0]
+        e_max = df["E_MAX"].iloc[0]
+        fig.suptitle(f"Source Light-Curves -  {e_min:g}-{e_max:g} keV (bin {energy_bin})", y=1.02)
         fig.tight_layout()
         return axes
 
@@ -172,6 +211,7 @@ class SPIResult:
         figsize_per_panel=(4.5, 3.2),
         energy_bins=None,
         sharey=False,
+        show_uplim=True
     ):
         """Plot one light curve per energy bin for a single source."""
         sname = str(source_name).strip()
@@ -196,9 +236,15 @@ class SPIResult:
             sdf = sdf_all[sdf_all["ENERGY_BIN"] == eb].copy().sort_values("IJD_START")
             e_min = sdf["E_MIN"].iloc[0]
             e_max = sdf["E_MAX"].iloc[0]
-            ax.errorbar(date_type+'_MID', 'FLUX_ML', xerr=date_type+'_ERR', yerr='FLUX_ERR_ML', fmt="ko", markersize=3, data=sdf, label=f"{e_min:g}-{e_max:g} keV (Bin {eb})")
-
-            # ax.set_title(f"Bin {eb}: {e_min:g}-{e_max:g} keV")
+            if show_uplim:
+                ax.errorbar(date_type+'_MID', xerr=date_type+'_ERR', y='FLUX_ML',  yerr='FLUX_ERR_ML', fmt="ko", markersize=4,
+                            data=sdf[~sdf.uplim], label=f"{e_min:g}-{e_max:g} keV (Bin {eb})")
+                ax.errorbar(date_type+'_MID', xerr=date_type+'_ERR', y=f'FLUX_UPLIM_{self.uplim_proba:g}', fmt='kv', markersize=6,
+                            label=f'Upper-limits ({self.uplim_proba*100:g}%)', data=sdf[sdf.uplim], uplims=True)
+                
+            else:
+                ax.errorbar(date_type+'_MID', 'FLUX_ML', xerr=date_type+'_ERR', yerr='FLUX_ERR_ML', fmt="ko", markersize=3,
+                            data=sdf, label=f"{e_min:g}-{e_max:g} keV (Bin {eb})")
 
             if i % ncols == 0:
                 ax.set_ylabel("Flux")
@@ -222,7 +268,7 @@ class SPIResult:
         for j in range(neb, len(axes)):
             axes[j].axis("off")
 
-        fig.suptitle(f"Light Curves by Energy Bin - Source: {sname}", y=1.02)
+        fig.suptitle(f"Light Curves by Energy Bin - {sname}", y=1.02)
         fig.tight_layout()
         return axes
 
