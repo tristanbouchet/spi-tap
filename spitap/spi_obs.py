@@ -147,6 +147,40 @@ class ObsSPI:
 
         # if recorded, last query values used as defaults
         self.import_last_query()
+
+    def __str__(self):
+        """Minimal summary of the current analysis state."""
+        lines = ["ObsSPI"]
+
+        if self.full_name is not None:
+            lines.append(f"  Main source: {self.full_name}")
+
+        if self.date_start is not None or self.date_end is not None:
+            lines.append(f"  dates: {self.date_start} -> {self.date_end}")
+
+        if self.off_angle is not None:
+            lines.append(f"  off-axis: {self.off_angle} deg")
+
+        if self.evt_type is not None:
+            lines.append(f"  evt: {self.evt_type}")
+
+        if self.e_channels is not None and len(self.e_channels) >= 2:
+            e_min = float(self.e_channels[0])
+            e_max = float(self.e_channels[-1])
+            n_bins = int(len(self.e_channels) - 1)
+            lines.append(f"  energies: {e_min:.1f}-{e_max:.1f} keV ({n_bins} bins)")
+
+        nearby_df = getattr(self, 'nearby_df', None)
+        if nearby_df is not None:
+            nearby_names = nearby_df.NAME.tolist()
+            preview = ", ".join(map(str, nearby_names[:5]))
+            if len(nearby_names) > 5:
+                preview += ", ..."
+            lines.append(f"  sources in fov: {len(nearby_names)}")
+            if preview:
+                lines.append(f"  fov preview: {preview}")
+
+        return "\n".join(lines)
     
     def import_path_config(self, config_file='config.txt'):
         """use the config file to set path attributes
@@ -875,7 +909,6 @@ out_expo_map_dol,s,h,"expo.fits",,,"Name of the output exposure map. None if lef
         print(f"Launching spimodfit (RUN_ID: {run_id})...")
         err_code = self.run_spi_cmd(self.spimodfit_cmd, logfile='spimodfit.log', isolate_env=False)
 
-        self.spec_path = f'{self.main_dir}/{self.src_dir}/{self.date_dir}/{self.ener_dir}/{self.fit_dir}'
         return err_code
         
     
@@ -983,6 +1016,9 @@ background_var_coef_02,s,h,"{bkg_var_n} {bkg_var_unit} {bkg_var_type}",,,"Time v
                 f_out.write(combined_content)
             
             print(f'Parameter file created: {output_par_file}')
+
+            # Run spimodfit
+            self.spec_path = f'{self.main_dir}/{self.src_dir}/{self.date_dir}/{self.ener_dir}/{self.fit_dir}'
             self.spimodfit_return_code = self.run_spimodfit(self.fit_dir, clobber=spimodfit_clobber)
             print(f'Fit directory at {self.spec_path}')
             if self.spimodfit_return_code != 0:
@@ -993,82 +1029,6 @@ background_var_coef_02,s,h,"{bkg_var_n} {bkg_var_unit} {bkg_var_type}",,,"Time v
             else:
                 N_src_spec= len(glob.glob('spectra_*'))
                 print(f'spimodfit ran successfully. {N_src_spec} spectra created.')
-
-    def run_analysis_noninteractive(
-        self,
-        src_dir,
-        full_name,
-        ra,
-        dec,
-        date_start,
-        date_end,
-        off_angle,
-        evt_type,
-        binning_type,
-        emin=None,
-        emax=None,
-        nbins=None,
-        e_channels_bounds=None,
-        e_channels_scales=None,
-        overwrite_date_dir=None,
-        skip_spiselectscw_par=False,
-        zenith_angle=10,
-        src_sel=None,
-        main_src_var_unit='d',
-        main_src_var_n='1',
-        main_src_var_type='i',
-        src_var_n='0',
-        src_var_unit='d',
-        src_var_type='n',
-        bkg_var_n='1',
-        bkg_var_unit='d',
-        bkg_var_type='i',
-        spimodfit_clobber=None,
-        analyze_spimodfit_result=True,
-        generate_response_matrix=True,
-        response_clobber='n',
-        verbose=True,
-    ):
-        """Run the pipeline without prompts. If src_sel is None, stop after nearby source list."""
-        self.setup_source(src_dir=src_dir, full_name=full_name, ra=ra, dec=dec)
-        self.select_observations(date_start=date_start, date_end=date_end, off_angle=off_angle, overwrite_dir=overwrite_date_dir)
-        self.setup_energies(
-            evt_type=evt_type,
-            binning_type=binning_type,
-            emin=emin,
-            emax=emax,
-            nbins=nbins,
-            e_channels_bounds=e_channels_bounds,
-            e_channels_scales=e_channels_scales,
-        )
-        self.make_spiselectscw_par(skip_spalready_exists=skip_spiselectscw_par)
-        self.process_background()
-        nearby_df = self.find_nearby(zenith_angle=zenith_angle)
-
-        if src_sel is None:
-            print('Nearby sources ready. Set src_sel and continue with select_brightest + spimodfit steps.')
-            return nearby_df
-
-        self.select_brightest(src_sel)
-        self.select_src_var(main_src_var_unit=main_src_var_unit, main_src_var_n=main_src_var_n, main_src_var_type=main_src_var_type)
-        self.make_spimodfit_par(
-            src_var_n=src_var_n,
-            src_var_unit=src_var_unit,
-            src_var_type=src_var_type,
-            src_max_angle=None,
-            bkg_var_n=bkg_var_n,
-            bkg_var_unit=bkg_var_unit,
-            bkg_var_type=bkg_var_type,
-            spimodfit_clobber=spimodfit_clobber,
-        )
-
-        if analyze_spimodfit_result:
-            self.analyze_spimodfit(verbose=verbose)
-        if generate_response_matrix:
-            self.generate_response(clobber=response_clobber)
-
-        return nearby_df
-    
     
     def make_spimodfit_par_interactive(self):
         """create spiselectscw parameter file
@@ -1120,13 +1080,11 @@ background_var_coef_02,s,h,"{bkg_var_n} {bkg_var_unit} {bkg_var_type}",,,"Time v
                 print(f'Channels: {channels_above_thresh.tolist()}')
                 print('Re-running spimodfit or ignoring these channels is recommanded.')
 
-            
+
     ########## Response generation (spirmfgen) ##########
 
-    def generate_response(self, clobber='n'):
+    def generate_response(self, clobber='n', outRMFfile = "rmf_spi"):
         """Generate response matrix using spirmf command"""
-        
-        outRMFfile = "rmf_spi"
         
         # Create symbolic links to templates
         print("Creating symbolic links to templates...")
@@ -1205,6 +1163,67 @@ background_var_coef_02,s,h,"{bkg_var_n} {bkg_var_unit} {bkg_var_type}",,,"Time v
                 with fits.open(sfile, mode="update", memmap=True) as hdul:
                     hdul[2].header["EXTNAME"] = "SPECTRUM"
 
+    ########## Global analysis ##########
+
+    def run_analysis_noninteractive(
+        self,
+        src_dir,
+        full_name, ra, dec,
+        date_start, date_end, off_angle,
+        evt_type, binning_type, emin=None, emax=None, nbins=None, e_channels_bounds=None, e_channels_scales=None,
+        overwrite_date_dir=None,
+        skip_spiselectscw_par=False,
+        zenith_angle=10,
+        src_sel=None,
+        main_src_var_unit='d', main_src_var_n='1', main_src_var_type='i',
+        src_var_n='0', src_var_unit='d', src_var_type='n',
+        bkg_var_n='1', bkg_var_unit='d', bkg_var_type='i',
+        spimodfit_clobber=None,
+        analyze_spimodfit_result=True,
+        generate_response_matrix=True,
+        response_clobber='n',
+        verbose=True,
+    ):
+        """Run the pipeline without prompts. If src_sel is None, stop after nearby source list."""
+        self.setup_source(src_dir=src_dir, full_name=full_name, ra=ra, dec=dec)
+        self.select_observations(date_start=date_start, date_end=date_end, off_angle=off_angle, overwrite_dir=overwrite_date_dir)
+        self.setup_energies(
+            evt_type=evt_type,
+            binning_type=binning_type,
+            emin=emin,
+            emax=emax,
+            nbins=nbins,
+            e_channels_bounds=e_channels_bounds,
+            e_channels_scales=e_channels_scales,
+        )
+        self.make_spiselectscw_par(skip_spalready_exists=skip_spiselectscw_par)
+        self.process_background()
+        nearby_df = self.find_nearby(zenith_angle=zenith_angle)
+
+        if src_sel is None:
+            print('Nearby sources ready. Set src_sel and continue with select_brightest + spimodfit steps.')
+            return nearby_df
+
+        self.select_brightest(src_sel)
+        self.select_src_var(main_src_var_unit=main_src_var_unit, main_src_var_n=main_src_var_n, main_src_var_type=main_src_var_type)
+        self.make_spimodfit_par(
+            src_var_n=src_var_n,
+            src_var_unit=src_var_unit,
+            src_var_type=src_var_type,
+            src_max_angle=None,
+            bkg_var_n=bkg_var_n,
+            bkg_var_unit=bkg_var_unit,
+            bkg_var_type=bkg_var_type,
+            spimodfit_clobber=spimodfit_clobber,
+        )
+
+        if analyze_spimodfit_result:
+            self.analyze_spimodfit(verbose=verbose)
+        if generate_response_matrix:
+            self.generate_response(clobber=response_clobber)
+
+        return nearby_df
+    
 
 class CatSPI:
     def __init__(self, cat_path=None, cat_ext='SPI.-SRCL-CAT', uint=True):
