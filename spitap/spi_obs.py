@@ -1272,9 +1272,9 @@ class CatSPI:
 
         sources_table = pd.DataFrame({
             "NAME": [self._norm_name(v) for v in self.table["NAME"][sel_idx]],
-            ra_colname: self.table[ra_colname][sel_idx],
-            dec_colname: self.table[dec_colname][sel_idx],
-            "SEP_DEG": sep_deg[sel_idx],
+            ra_colname: np.array(self.table[ra_colname][sel_idx], dtype=np.float64),
+            dec_colname: np.array(self.table[dec_colname][sel_idx], dtype=np.float64),
+            "SEP_DEG": np.array(sep_deg[sel_idx], dtype=np.float64)
         })
         # if has_flux_col:
         #     sources_table[f"{flux_col}[{flux_element}]"] = flux_val
