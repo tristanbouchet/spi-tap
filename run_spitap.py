@@ -37,6 +37,8 @@ if __name__ == '__main__':
         main_dir = main_dir,
         initial_dir=initial_dir,
         initial_env=initial_env,
+        config_file='config.txt',
+        init_headas= True,
         testrun=False
         )
     

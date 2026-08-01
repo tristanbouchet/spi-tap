@@ -61,6 +61,7 @@ class ObsSPI:
     EVT_BIN_SIZE = {'SE':.5, 'PSD':.5, 'HE':1.}
     
     def __init__(self, main_dir, initial_dir='.', initial_env=None, config_file='config.txt',
+                 init_headas=True,
                  gnrl_cat_ext = 'GNRL-REFR-CAT', bg_idx_filename = 'output_bgmodel_conti_sep_idx.fits.gz',
                  spiselect_par_tpl_file = 'spiselectscw.template.par', spimodfit_par_tpl_file='spimodfit.template.par',
                  spimodfit_result_file = 'results.spimodfit.fits',
@@ -104,7 +105,12 @@ class ObsSPI:
         self.all_revs_path = None
         self.bkg_db_dir = None
         self.import_path_config(config_file)
-        # TO DO: need to figure out a better way to access template files...
+
+        # Optionally load HEASoft environment from headas-init.csh in Python
+        # if not already done in the rc file
+        if init_headas:
+            self.initialize_headas()
+
         self.templates_dir = f'{initial_dir}/templates_par'
         # default file names
         self.gnrl_cat_ext =  gnrl_cat_ext
@@ -272,6 +278,36 @@ class ObsSPI:
             long_src_coord -= 360
         lat_src_coord = source_coord_galactic.b.deg
         return lat_src_coord, long_src_coord
+
+    def initialize_headas(self, init_script=None, shell='tcsh'):
+        """Source headas-init.csh and merge resulting env into Python/subprocess env."""
+        self.headas_dir = self.headas_dir or os.environ.get('HEADAS')
+        init_script = init_script or os.path.join(self.headas_dir, 'headas-init.csh')
+
+        try:
+            proc = subprocess.run(
+                [shell, '-c', f'source "{init_script}"; printenv'],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(f"Failed to source HEASoft env via {shell}. stderr:\n{exc.stderr}") from exc
+
+        env_updates = dict(
+            line.split('=', 1)
+            for line in proc.stdout.splitlines()
+            if '=' in line
+        )
+        if self.headas_dir:
+            env_updates['HEADAS'] = self.headas_dir
+
+        os.environ.update(env_updates)
+        self.initial_env = (self.initial_env or os.environ.copy())
+        self.initial_env.update(env_updates)
+
+        print(f"Loaded HEASoft environment from {init_script}")
+        return env_updates
     
     def add_dir_layer(self, dir_name, overwrite_dir=None):
         """create a new directory. if it already exists, ask whether to remove it.
@@ -1124,6 +1160,7 @@ background_var_coef_02,s,h,"{bkg_var_n} {bkg_var_unit} {bkg_var_type}",,,"Time v
             self.fix_spec_extensions(outRMFfile=outRMFfile)
         else:
             print(f'{RED}RMF generation ended with code {err_code}.{RESET}')
+            print(f'Check log at {self.spec_path}/spirmf.log')
             print('Try reloading the session and running again.')
 
         return err_code
@@ -1331,11 +1368,13 @@ class CatSPI:
         self.new_hdul[self.cat_ext] = fits.BinTableHDU(tab, header=self.new_hdul[self.cat_ext].header)
         self.new_hdul.writeto(new_cat_path, overwrite=overwrite)
 
-    def add_src(self, src_dico, confusion_angle=1, ref_src_name = 'Crab'):
+    # TO DO: 
+    def add_src(self, src_dico, confusion_angle=1, ref_src_name = 'Crab', replace_confused=False):
         '''
         add new source to catalog.
         check whether there is already a source within the confusion_angle first.
         for parameters not found in the src_dico, a reference row with ref_src_name is used.
+        if replace_confused, replaced the confused sources
         '''
         pass
 
