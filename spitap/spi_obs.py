@@ -37,7 +37,7 @@ from astropy.io import fits
 from astropy.table import Table
 from astropy.time import Time
 
-from .obs_background import ScwTracerDB, ObsBkg, LiveTimeRev
+from .old_obs_background import ScwTracerDB, ObsBkg, LiveTimeRev
 
 RED = "\033[31m"
 GREEN = "\033[32m"
@@ -59,6 +59,7 @@ class ObsSPI:
     """Pipeline for SPI observation analysis"""
     
     EVT_BIN_SIZE = {'SE':.5, 'PSD':.5, 'HE':1.}
+    EXTRA_REV_NODES= [1435.41635, 1659.46, 3337.5, 3799.66740]
     
     def __init__(self, main_dir, initial_dir='.', initial_env=None, config_file='config.txt',
                  init_headas=True,
@@ -84,6 +85,7 @@ class ObsSPI:
         self.unique_revs = None
         self.N_point_select = None
         self.N_unique_revs = None
+        self.rev_dates_obs = None
         # energies
         self.evt_type = None
         self.binning_type = None
@@ -210,6 +212,9 @@ class ObsSPI:
 
     def import_rev_nodes(self):
         '''import the perigee time (~ start of revolution) for all revs'''
+        last_rev_days=3
+        last_date_dico= {'DATE':np.timedelta64(int(last_rev_days), "D"), 'MJD':last_rev_days, 'IJD':last_rev_days}
+
         if self.all_revs_path is None:
             return
         hdul= fits.open(self.all_revs_path)
@@ -219,6 +224,16 @@ class ObsSPI:
                       })
         self.rev_dates_df['MJD_START'] = self.MJDREF + self.rev_dates_df.IJD_START
         self.rev_dates_df['DATE_START'] = self.rev_dates_df.MJD_START.apply(mjd_to_isot)
+
+        for start_col in [col for col in self.rev_dates_df.columns if col.endswith('_START')]:
+            end_col = start_col.replace('_START', '_END')
+            # use start date of next rev as end date
+            next_values = self.rev_dates_df[start_col].shift(-1)
+            # for last rev, extrapolate by few days (last_rev_days)
+            add_to_last= last_date_dico[start_col.replace('_START', '')]
+            next_values.iloc[-1] = next_values.iloc[-2] + add_to_last
+            self.rev_dates_df[end_col] = next_values
+
         return self.rev_dates_df
 
     ########## Query tools ##########
@@ -486,6 +501,7 @@ class ObsSPI:
             # TO DO: import REV as string
             self.df_select = pd.read_csv('df_select.csv')
         else:
+            # TO DO: add more complex selection with multiple dates start/stop
             self.df_select = self.scw_tracer_db.df_scw.loc[(self.scw_tracer_db.df_scw.DateStart < date_end) & (self.scw_tracer_db.df_scw.DateEnd > date_start)]
             print(f'Searching for pointings within {off_angle}° of source...')
             # source_coord = SkyCoord(ra=self.ra*u.deg, dec=self.dec*u.deg)
@@ -498,6 +514,9 @@ class ObsSPI:
         self.N_point_select = len(self.df_select)
         self.unique_revs = self.df_select.REV.unique()
         self.N_unique_revs = len(self.unique_revs)
+        # select rev within dates for variability selection
+        self.rev_dates_obs = self.rev_dates_df[(self.rev_dates_df.DATE_END>self.date_start) & (self.rev_dates_df.DATE_START<self.date_end)].copy()
+
         print(f"{GREEN}Found {self.N_point_select} pointings, for {self.N_unique_revs} unique revolutions.{RESET}")
         if self.N_unique_revs < 30:
             print(self.unique_revs)
@@ -828,7 +847,7 @@ out_expo_map_dol,s,h,"expo.fits",,,"Name of the output exposure map. None if lef
         return self.nearby_df
     
     def select_brightest(self, src_sel = 15):
-        '''select brightest sources'''
+        '''select brightest sources and update catalog'''
         if type(src_sel) == int:
             if src_sel <= 0:
                 nearby_src_list = self.nearby_df.NAME.tolist()
@@ -857,38 +876,58 @@ out_expo_map_dol,s,h,"expo.fits",,,"Name of the output exposure map. None if lef
 
 
     ########## Main source variability ##########
+    # TO DO: put variability params in self.nearby_df for each sources
+    # update catalog variability columns for ALL sources, except for the "per rev"
+    # if at least 1 "per rev", src variability, add src_var in spimodfit param file
 
     VAR_UNIT_CONVERSION = {
         'pi':'constant, pointings, increments', 'di':'constant, days, increments',
         'pn':'constant, pointings, nodes', 'dn':'constant, days, nodes',
-        'ri':'constant, days, nodes'
+        'rn':'constant, days, nodes'
         }
 
     @staticmethod
-    def convert_var_n_array(n, array_length=8):
-        arr= np.zeros(array_length, dtype=np.int8)
-        arr[0] = n
+    def complete_zeros_array(vec, array_length=8, dtype=np.int8):
+        '''take vec and complete with zeros to fill arr of size array_length'''
+        arr= np.zeros(array_length, dtype=dtype)
+        arr[:len(vec)] = vec
         return arr
         
     def select_src_var(self, main_src_var_unit, main_src_var_n, main_src_var_type, src_name=None):
         '''
         modify the variability in the catalog using keywords: VAR_MODL, VAR_NPAR, VAR_PARS (array)
-        variability unit can be p(ointing) or d(ays) and is converted using a dico into correct catalog value
+        variability unit can be p(ointing), d(ays) or r(evolution) and is converted using a dico into correct catalog value
 
         by default (src_name=None) the main analysis source is used.
         '''
         self.all_src_dico= {}
+        size_var_pars= self.cat.new_table['VAR_PARS'].shape[1]
         if src_name is None:
             src_name = self.full_name
+        # increment = periodic number of IJD between dates 
         if main_src_var_type == 'i':
             npar = int(1)
-            par_array = self.convert_var_n_array(main_src_var_n, self.cat.new_table['VAR_PARS'].shape[1])
+            par_array = self.complete_zeros_array([main_src_var_n], size_var_pars, dtype=np.int8)
+        # nodes = explicit IJD list
         elif main_src_var_type == 'n':
-            np.fromstring(main_src_var_n, dtype=int, sep=' ')
-        elif main_src_var_type == 'r':
-            pass
+            if main_src_var_unit == 'r':
+                # use dates to find rev nodes
+                dates_rev=self.rev_dates_obs.IJD_START.to_numpy()
+                par_array= self.complete_zeros_array(dates_rev, size_var_pars, dtype=np.float64)
+                npar=len(dates_rev)
+
+            elif main_src_var_unit in ['p', 'd']:
+                par_array = np.fromstring(main_src_var_n, dtype=np.float64, sep=' ')
+                npar=len(par_array)
+            else:
+                raise NotImplementedError(main_src_var_unit+main_src_var_type)
+        # same variability as other sources
+        # variability will be written in par file instead of modifying input catalog
+        elif main_src_var_type == '':
+            print(f'No variability type chosen for main source. Its variability will be set by the default variability (next step).')
+            return
         else:
-            raise NotImplementedError(main_src_var_type)
+            raise NotImplementedError(main_src_var_unit+main_src_var_type)
 
 
         self.all_src_dico[src_name] = {
@@ -909,7 +948,8 @@ out_expo_map_dol,s,h,"expo.fits",,,"Name of the output exposure map. None if lef
     ########## Flux (spimodfit) ##########
 
     def run_spimodfit(self, run_id, clobber=True):
-        """Execute the spimodfit command following the submit-spimodfit_v3.2_ga05us.sh script
+        """
+        Execute the spimodfit command following the submit-spimodfit_v3.2_ga05us.sh script
         use clobber=None for interactive sessions
         other True/False to remove directory
         """
@@ -951,7 +991,11 @@ out_expo_map_dol,s,h,"expo.fits",,,"Name of the output exposure map. None if lef
     def make_spimodfit_par(self, src_var_n=0, src_var_unit='d', src_var_type='n', src_max_angle=None,
                            bkg_var_n=1, bkg_var_unit='d', bkg_var_type='i', fov_cat_path=None, overwrite_fov_cat= True,
                            skip_spimodfit_exists=False, spimodfit_clobber=None):
-        """create spimodfit parameter file"""
+        """
+        create spimodfit parameter file
+        variability of sources are written here, only for those that have empy VAR_PARS/VAR_NPAR columns
+        for instance for the main source, the variability is written in the catalog beforehand
+        """
 
         self.run_path = f'{self.main_dir}/{self.src_dir}/{self.date_dir}/{self.ener_dir}'
         print(f'Current spimodfit run directory: {self.run_path}')
@@ -1010,13 +1054,13 @@ source_parameters_fit,i,h,1,0,1,"Sources fit parameter 1=yes"
 
             if src_var_unit == 'r':
 
-                spimodfit_par_str += f"""
+                spimodfit_par_str += f"""# VARIATION PER REVOLUTION
 source_var_coef,s,h,"&{self.all_revs_path}[1] col=TIME_PERIGEE d n, 1435.41635 1659.46 3337.5 3799.66740 d n",,,"Time variability definition : d(ays)/p(pointings) + i(ncrements)/n(nodes)"
 sources_zenith_angle,r,h,{src_max_angle},0,," Sources maximum zenithal angle"
 
     """
             else:
-                spimodfit_par_str += f"""# VARIATION PER REVOLUTION
+                spimodfit_par_str += f"""
 source_var_coef,s,h,"{src_var_n} {src_var_unit} {src_var_type}",,,"Time variability definition : d(ays)/p(pointings) + i(ncrements)/n(nodes")
 sources_zenith_angle,r,h,{src_max_angle},0,," Sources maximum zenithal angle"
 

@@ -3,9 +3,12 @@ import math
 import warnings
 import numpy as np
 import pandas as pd
+import os
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from scipy import stats
+from matplotlib.lines import Line2D
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 from astropy.io import fits
 from astropy.table import Table
@@ -20,20 +23,32 @@ def mjd_to_isot(x):
     return np.datetime64(isot.value) # convert to plot-able dates
 
 class SPIResult:
-    def __init__(self, fit_path, result_file="results.spimodfit.fits", uplim_proba=.9):
-        self.fit_path = fit_path
-        self.result_file = result_file
+    def __init__(self, fit_path, result_file="results.spimodfit.fits", residuals_file="residuals.fits", uplim_proba=.9):
         self.uplim_proba = uplim_proba
+        self.fit_path = fit_path
+        # result file with count-rates
+        self.result_file = result_file
         self.result_path = f"{fit_path}/{result_file}"
-        self.hdul = fits.open(self.result_path)
+        self.hdul_result = fits.open(self.result_path)
 
-        self.ener_df = Table(self.hdul["SPI.-EBDS-SET"].data).to_pandas()
+        self.ener_df = Table(self.hdul_result["SPI.-EBDS-SET"].data).to_pandas()
         self.sources_by_eb = {}
         self.bkg_by_eb = {}
         self.df_sources = pd.DataFrame()
         self.df_bkg = pd.DataFrame()
         print("Building result data frames...")
-        self._build_dataframes()
+        self._build_result_df()
+
+        # residual file (if it exists)
+        self.residuals_file= residuals_file
+        if residuals_file in os.listdir(fit_path):
+            self.residuals_path = f"{fit_path}/{residuals_file}"
+            print('Building residual array...')
+            self._build_residuals()
+        else:
+            self.residuals_path = None
+            print(f'No residual file ({residuals_file}) found in {fit_path}.')
+        
 
     @staticmethod
     def _strip_value(v):
@@ -47,7 +62,8 @@ class SPIResult:
     def _safe_scalar_columns(table):
         return [name for name in table.colnames if len(table[name].shape) <= 1]
 
-    def _build_dataframes(self):
+
+    def _build_result_df(self):
         """Combine all energy extensions of the result FITS file into source/background DataFrames."""
         n_energy_bins = len(self.ener_df)
 
@@ -63,7 +79,7 @@ class SPIResult:
             fits_card_logger.setLevel(logging.ERROR)
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                ext_data = self.hdul[eb_ext].data
+                ext_data = self.hdul_result[eb_ext].data
                 table = Table(ext_data)
                 scalar_cols = self._safe_scalar_columns(table)
                 df = table[scalar_cols].to_df("pandas")
@@ -73,7 +89,8 @@ class SPIResult:
                 if col in df.columns:
                     df[col] = df[col].apply(self._strip_value)
 
-            df = df.rename(columns={"PAR_ID": "NAME", "TSTART": "IJD_START", "TSTOP":"IJD_STOP"})
+            df = df.rename(columns={"PAR_ID": "NAME", "TSTART_PTG": "IJD_START", "TSTOP_PTG":"IJD_STOP"})
+            # df = df.rename(columns={"PAR_ID": "NAME", "TSTART": "IJD_START", "TSTOP":"IJD_STOP"})
             df['MJD_START'] = df.IJD_START + IJD_start_MJD
             df['MJD_STOP'] = df.IJD_STOP + IJD_start_MJD
             df['ISOT_START'] = df.MJD_START.apply(mjd_to_isot)
@@ -111,6 +128,38 @@ class SPIResult:
         self.df_sources = pd.concat(all_sources, ignore_index=True)
         self.df_bkg = pd.concat(all_bkg, ignore_index=True)
 
+    def _build_residuals(self, res_ext_name= 'SPI.-MAXL-RES', res_col_name='RESIDUE', res_err_col_name='STAT_ERR'):
+        '''
+        Each row is indexed as [point * Ndet + det] and contains one value per energy bin.
+        '''
+        self.hdul_residuals = fits.open(self.residuals_path)
+        self.res_header= self.hdul_residuals[res_ext_name].header
+        self.Ndetectors = self.res_header['DET_NUM']
+        self.Nscw = self.res_header['ISOC_NUM']
+        self.Npoint = self.res_header['PT_NUM']
+        self.res_tab = Table(self.hdul_residuals[res_ext_name].data)
+
+        expected_rows = self.Npoint * self.Ndetectors
+        if len(self.res_tab) != expected_rows:
+            raise ValueError(
+                f"Expected {expected_rows} residual rows for {self.Npoint} points and "
+                f"{self.Ndetectors} detectors, found {len(self.res_tab)}."
+            )
+        
+        residuals = np.asarray(self.res_tab[res_col_name], dtype=float)
+        residual_errors = np.asarray(self.res_tab[res_err_col_name], dtype=float)
+        n_energy_bins = residuals.shape[-1]
+        self.residuals = residuals.reshape(self.Npoint, self.Ndetectors, n_energy_bins)
+        self.residual_errors = residual_errors.reshape(self.Npoint, self.Ndetectors, n_energy_bins)
+        self.chi = np.divide(
+            self.residuals,
+            self.residual_errors,
+            out=np.full_like(self.residuals, np.nan),
+            where=self.residual_errors != 0,
+        )
+        # self.chi_per_point_energy = np.nansum(self.chi, axis=1)
+        print(f'Shape of residual array {self.chi.shape}')
+
     def get_sources(self, energy_bin=None):
         if energy_bin is None:
             return self.df_sources.copy()
@@ -121,6 +170,13 @@ class SPIResult:
             return self.df_bkg.copy()
         return self.bkg_by_eb.get(energy_bin, pd.DataFrame()).copy()
 
+    def select_pointing(self):
+        """
+        remove bad pointing based on criteria:
+        if 1 det has |chi_dp|>det_thresh (default 7) -> rm point
+        else, if std(chi_p) > std_point_thresh (default 2) -> rm point
+        """
+        pass
     
     def plot_source_lightcurves(
         self,
@@ -130,7 +186,8 @@ class SPIResult:
         figsize_per_panel=(4.5, 3.2),
         share_dates=False,
         sharey=False,
-        show_uplim=True
+        show_uplim=True,
+        show_rel_flux=False
     ):
         date_type = str(date_type).upper()
         df = self.get_sources(energy_bin=energy_bin)
@@ -194,6 +251,15 @@ class SPIResult:
 
             ax.grid(alpha=0.3)
 
+            if show_rel_flux:
+                mean_flux = sdf["FLUX_ML"].mean()
+                ax.axhline(mean_flux, color="green", linestyle="--")
+                ax2 = ax.twinx()
+                ylim = ax.get_ylim()
+                ax2.set_ylim((ylim[0] - mean_flux) / mean_flux * 100, (ylim[1] - mean_flux) / mean_flux * 100)
+                if i % ncols == ncols - 1 or i == nsrc - 1:
+                    ax2.set_ylabel("Rel. dev. from mean (%)")
+
         for j in range(nsrc, len(axes)):
             axes[j].axis("off")
 
@@ -210,8 +276,7 @@ class SPIResult:
         date_type="MJD",
         figsize_per_panel=(4.5, 3.2),
         energy_bins=None,
-        sharey=False,
-        show_uplim=True
+        sharey=False, show_uplim=True, show_rel_flux=False
     ):
         """Plot one light curve per energy bin for a single source."""
         sname = str(source_name).strip()
@@ -265,6 +330,15 @@ class SPIResult:
             ax.grid(alpha=0.3)
             ax.legend(loc='best')
 
+            if show_rel_flux:
+                mean_flux = sdf["FLUX_ML"].mean()
+                ax.axhline(mean_flux, color="green", linestyle="--")
+                ax2 = ax.twinx()
+                ylim = ax.get_ylim()
+                ax2.set_ylim((ylim[0] - mean_flux) / mean_flux * 100, (ylim[1] - mean_flux) / mean_flux * 100)
+                if i % ncols == ncols - 1 or i == neb - 1:
+                    ax2.set_ylabel("Rel. dev. from mean (%)")
+
         for j in range(neb, len(axes)):
             axes[j].axis("off")
 
@@ -272,6 +346,99 @@ class SPIResult:
         fig.tight_layout()
         return axes
 
+    def plot_chi_per_point_per_det(self, energy_bins=None, n_sigma=3, ncols=1, figsize=(8, 5),
+                                   show_det=False, use_same_y_lim=False, show_hist=False, n_hist_bins=30):
+        """Plot chi by energy bin, optionally showing a separate series per detector."""
+        if not hasattr(self, "chi"):
+            raise ValueError("Residual chi values are unavailable; load a residuals file first.")
+        if n_sigma <= 0:
+            raise ValueError("n_sigma must be positive.")
+
+        chi_values = self.chi
+        if energy_bins is None:
+            energy_bins = range(chi_values.shape[2])
+        else:
+            energy_bins = list(energy_bins)
+
+        show_side_histogram = show_hist and ncols == 1
+        ncols = min(ncols, len(energy_bins))
+        nrows = math.ceil(len(energy_bins) / ncols)
+        fig, axes = plt.subplots(
+            nrows, ncols,
+            figsize=(figsize[0], figsize[1] * nrows),
+            squeeze=False,
+        )
+        axes = axes.ravel()
+
+        finite_chi = np.abs(chi_values[:, :, list(energy_bins)])
+        finite_chi = finite_chi[np.isfinite(finite_chi)]
+        global_y_lim = max(float(finite_chi.max()) if finite_chi.size else 0, n_sigma) * 1.05
+
+        Nparam= self.res_header['PARS_FIT']
+        for ax, energy_bin in zip(axes, energy_bins):
+            e_min = self.ener_df.loc[energy_bin, "E_MIN"]
+            e_max = self.ener_df.loc[energy_bin, "E_MAX"]
+            flat_chi = chi_values[:, :, energy_bin].reshape(-1)
+
+            if show_side_histogram:
+                finite_flat_chi = flat_chi[np.isfinite(flat_chi)]
+                hist_ax = make_axes_locatable(ax).append_axes("right", size="30%", pad=0.) # pad=0.08
+                histogram, bin_edges, _ = hist_ax.hist(
+                    finite_flat_chi, orientation="horizontal", alpha=0.7, label="Residuals", bins=n_hist_bins,
+                )
+                bin_width = np.diff(bin_edges).mean()
+                gaussian_y = np.linspace(bin_edges[0], bin_edges[-1], 200)
+                gaussian_counts = stats.norm.pdf(gaussian_y) * finite_flat_chi.size * bin_width
+                hist_ax.plot(gaussian_counts, gaussian_y, 'g--', label="N(0, 1)")
+                hist_ax.axhline(n_sigma, color="red", linestyle="--") # , label=f"{n_sigma:g}-"+r"$\sigma$"
+                hist_ax.axhline(-n_sigma, color="red", linestyle="--")
+                hist_ax.axhline(0., color="black", linestyle=":")
+                # hist_ax.set_xlabel("Count")
+                hist_ax.set_xticks([])
+                hist_ax.set_yticks([])
+                hist_ax.legend(loc="best")
+
+            # recompute chi2 and reduced chi2
+            Ndata = (~np.isnan(flat_chi)).sum()
+            Ndof = Ndata - Nparam
+            chi2 = np.nansum(self.chi[:,:,energy_bin].flatten()**2)
+            chi2_red = chi2/Ndof
+
+            ax.set_title(f"{e_min:g}-{e_max:g} keV (bin {energy_bin})")
+            label_plt= rf"$\mu$= {np.nanmean(flat_chi):.2e}, ($\sigma$ - 1)={np.nanstd(flat_chi)-1:.2e}"+"\n"
+            label_plt += rf"$\chi^2_r$= {chi2_red:.2f} ({Ndof} dof)"
+            if show_det:
+                for detector in range(self.Ndetectors):
+                    if np.isnan(chi_values[:, detector, :]).all():
+                        continue
+                    ax.plot(
+                        chi_values[:, detector, energy_bin], ".",
+                    )
+            else:
+                ax.plot(
+                    flat_chi, ".", label=label_plt,
+                )
+            ax.axhline(n_sigma, color="red", linestyle="--", label=f"{n_sigma:g}-"+r"$\sigma$") 
+            ax.axhline(-n_sigma, color="red", linestyle="--")
+            ax.axhline(0., color="black", linestyle=":")
+            if use_same_y_lim:
+                ax.set_ylim(-global_y_lim, global_y_lim)
+                if show_side_histogram:
+                    hist_ax.set_ylim(-global_y_lim, global_y_lim)
+
+            ax.set_xlabel("Index (point * Ndet + det)")
+            ax.set_ylabel(r"$\Delta \chi$")
+            ax.grid(alpha=0.3)
+            ax.legend(loc="best")
+
+        for ax in axes[len(energy_bins):]:
+            ax.set_visible(False)
+
+        fig.tight_layout()
+        return axes
+
+
+
     def close(self):
-        self.hdul.close()
+        self.hdul_result.close()
         

@@ -1,8 +1,8 @@
 SPI-TAP — SPI Transient Analysis Pipeline
 
-This code allows to run the INTEGRAL/SPI analysis on the AG Siegert ga05us server in Würzburg.
+Runs the INTEGRAL/SPI analysis on the AG Siegert ga05us server in Würzburg.
 
-It runs the entire SPI pipeline for a point source, given dates, energy bins and source variability.
+It runs the entire SPI pipeline for a point source, given dates, energy bins and sources variability.
 It can be called directly for quick interactive session, or imported for automatized analysis.
 
 # Requirements
@@ -17,7 +17,7 @@ numpy scipy pandas astropy ipython
 - Create background model
 - Select variability parameters for sources and bkg
 - Run model fitting with spimodfit and create responses
-- Analyze results (spectral fit, residuals, light-curves)
+- Analyze results (spectral fit, light-curves)
 
 # Quick interactive session
 
@@ -48,6 +48,8 @@ run run_spitap --obsdir <path_to_analysis>
 and let the prompts guide you.
 
 For automatized runs, use the auto_spitab.ipynb notebook, where all the run parameters can be stored in a dictionary.
+
+Some functionalities such as diffuse emission are purposfully not implemented in order to avoid becoming a [Rube-Goldberg-machine](https://en.wikipedia.org/wiki/Rube_Goldberg_machine).
 
 <!-- # Full install (WIP)
 

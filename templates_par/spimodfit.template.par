@@ -23,8 +23,10 @@ background-int,s,h,"back_model.fits" ,,,"output background file"
 # Model residuals
 #--------------------------------------------------
 residuals_file,s,h,"residuals.fits",,,"Residues filename"
-residuals_output,i,h,0,0,1 ,"Residues output : 0=none,1=time history"
+# residuals_output,i,h,0,0,1 ,"Residues output : 0=none,1=time history"
+residuals_output,i,h,1,0,1 ,"Residues output : 0=none,1=time history"
 back_proj_output,i,h ,0,0,1,"Back projection of residues on sky : 0=No,1=Yes" 
+# back_proj_output,i,h ,1,0,1,"Back projection of residues on sky : 0=No,1=Yes" 
 #--------------------------------------------------
 # Spectra
 #--------------------------------------------------
