@@ -45,6 +45,7 @@ class SPIResult:
             self.residuals_path = f"{fit_path}/{residuals_file}"
             print('Building residual array...')
             self._build_residuals()
+            self._make_stat_df()
         else:
             self.residuals_path = None
             print(f'No residual file ({residuals_file}) found in {fit_path}.')
@@ -65,12 +66,12 @@ class SPIResult:
 
     def _build_result_df(self):
         """Combine all energy extensions of the result FITS file into source/background DataFrames."""
-        n_energy_bins = len(self.ener_df)
+        self.Nebin = len(self.ener_df)
 
         all_sources = []
         all_bkg = []
 
-        for eb in range(n_energy_bins):
+        for eb in range(self.Nebin):
             eb_ext = 3 + eb
 
             # Silence all warnings/messages while reading this extension.
@@ -130,13 +131,16 @@ class SPIResult:
 
     def _build_residuals(self, res_ext_name= 'SPI.-MAXL-RES', res_col_name='RESIDUE', res_err_col_name='STAT_ERR'):
         '''
-        Each row is indexed as [point * Ndet + det] and contains one value per energy bin.
+        Each row is indexed as [point * Ndet + det] and contains two elements per energy bin:
+        residual and error vectors, both in counts/s
+        delta_chi is then defined as residual/error, with indexing: [pointing, detector, energy]
         '''
         self.hdul_residuals = fits.open(self.residuals_path)
         self.res_header= self.hdul_residuals[res_ext_name].header
         self.Ndetectors = self.res_header['DET_NUM']
         self.Nscw = self.res_header['ISOC_NUM']
         self.Npoint = self.res_header['PT_NUM']
+        self.Nparam = self.res_header['PARS_FIT']
         self.res_tab = Table(self.hdul_residuals[res_ext_name].data)
 
         expected_rows = self.Npoint * self.Ndetectors
@@ -148,17 +152,33 @@ class SPIResult:
         
         residuals = np.asarray(self.res_tab[res_col_name], dtype=float)
         residual_errors = np.asarray(self.res_tab[res_err_col_name], dtype=float)
-        n_energy_bins = residuals.shape[-1]
-        self.residuals = residuals.reshape(self.Npoint, self.Ndetectors, n_energy_bins)
-        self.residual_errors = residual_errors.reshape(self.Npoint, self.Ndetectors, n_energy_bins)
-        self.chi = np.divide(
+        # self.Nebin = residuals.shape[-1]
+        self.residuals = residuals.reshape(self.Npoint, self.Ndetectors, self.Nebin)
+        self.residual_errors = residual_errors.reshape(self.Npoint, self.Ndetectors, self.Nebin)
+        self.delta_chi = np.divide(
             self.residuals,
             self.residual_errors,
             out=np.full_like(self.residuals, np.nan),
             where=self.residual_errors != 0,
         )
-        # self.chi_per_point_energy = np.nansum(self.chi, axis=1)
-        print(f'Shape of residual array {self.chi.shape}')
+        # self.delta_chi_per_point_energy = np.nansum(self.delta_chi, axis=1)
+        print(f'Shape of residual array {self.delta_chi.shape}')
+
+    def _make_stat_df(self):
+        
+        # count all detector+pointing bins that are not nan (=dead detectors)
+        Ndata_vec = np.sum((~np.isnan(self.delta_chi)), axis=(0,1))
+        df_stat=pd.DataFrame({
+            'e_bin':np.arange(self.Nebin),
+            'n_data':Ndata_vec,
+            'dof':Ndata_vec - self.Nparam,
+            'chi2':np.nansum(self.delta_chi**2, axis=(0,1))
+        })
+        df_stat['chi2_red']= df_stat['chi2']/df_stat['dof']
+        df_stat['p_value']= df_stat.apply(lambda x:stats.chi2.sf(x['chi2'], x['dof']), axis=1)
+        df_stat['p_value_pct']= df_stat['p_value']*100
+        self.df_stat= df_stat
+        print(df_stat)
 
     def get_sources(self, energy_bin=None):
         if energy_bin is None:
@@ -170,13 +190,6 @@ class SPIResult:
             return self.df_bkg.copy()
         return self.bkg_by_eb.get(energy_bin, pd.DataFrame()).copy()
 
-    def select_pointing(self):
-        """
-        remove bad pointing based on criteria:
-        if 1 det has |chi_dp|>det_thresh (default 7) -> rm point
-        else, if std(chi_p) > std_point_thresh (default 2) -> rm point
-        """
-        pass
     
     def plot_source_lightcurves(
         self,
@@ -234,6 +247,9 @@ class SPIResult:
                 
             else:
                 ax.errorbar(date_type+'_MID', 'FLUX_ML', xerr=date_type+'_ERR', yerr='FLUX_ERR_ML', fmt="ko", markersize=3, data=sdf)
+
+            # show flux=0 line
+            ax.axhline(0., color='grey', linestyle='--', alpha=.5)
 
             if share_dates:
                     ax.set_xlim(x_min_plot, x_max_plot)
@@ -310,6 +326,8 @@ class SPIResult:
             else:
                 ax.errorbar(date_type+'_MID', 'FLUX_ML', xerr=date_type+'_ERR', yerr='FLUX_ERR_ML', fmt="ko", markersize=3,
                             data=sdf, label=f"{e_min:g}-{e_max:g} keV (Bin {eb})")
+            # show flux=0 line
+            ax.axhline(0., color='grey', linestyle='--', alpha=.5)
 
             if i % ncols == 0:
                 ax.set_ylabel("Flux")
@@ -346,15 +364,78 @@ class SPIResult:
         fig.tight_layout()
         return axes
 
-    def plot_chi_per_point_per_det(self, energy_bins=None, n_sigma=3, ncols=1, figsize=(8, 5),
-                                   show_det=False, use_same_y_lim=False, show_hist=False, n_hist_bins=30):
-        """Plot chi by energy bin, optionally showing a separate series per detector."""
-        if not hasattr(self, "chi"):
-            raise ValueError("Residual chi values are unavailable; load a residuals file first.")
-        if n_sigma <= 0:
-            raise ValueError("n_sigma must be positive.")
+    
+    
+    def select_pointing(self, det_thresh=7., std_point_thresh=3., plot_flags=False):
+        """
+        Flag pointings with an extreme detector residual or detector spread for delta chi.
+        """
+        chi_values = self.delta_chi
+        valid_detectors = np.isfinite(chi_values)
+        valid_counts = np.sum(valid_detectors, axis=1)
 
-        chi_values = self.chi
+        detector_outlier_mask = valid_detectors & (np.abs(chi_values) > det_thresh)
+        detector_outlier_count = np.sum(detector_outlier_mask, axis=1)
+        detector_outlier_flag = detector_outlier_count > 0
+
+        safe_chi = np.where(valid_detectors, chi_values, 0.0)
+        detector_mean = np.divide(
+            np.sum(safe_chi, axis=1),
+            valid_counts,
+            out=np.full(valid_counts.shape, np.nan, dtype=float),
+            where=valid_counts > 0,
+        )
+        centered_chi = np.where(valid_detectors, safe_chi - detector_mean[:, None, :], 0.0)
+        detector_std = np.sqrt(
+            np.divide(
+                np.sum(centered_chi**2, axis=1),
+                valid_counts,
+                out=np.full(valid_counts.shape, np.nan, dtype=float),
+                where=valid_counts > 0,
+            )
+        )
+        std_flag = (valid_counts > 0) & (detector_std > std_point_thresh)
+        self.combined_flag = detector_outlier_flag | std_flag
+        if plot_flags:
+            fig, axes = plt.subplots(3, 1, figsize=(10, 9))
+            axes[0].set_title(f"Number of abs(det chi) > {det_thresh}")
+            axes[0].imshow(detector_outlier_count.T, aspect="auto", interpolation="none", origin="lower")
+            axes[1].set_title(f"Flag of det chi std > {std_point_thresh}")
+            axes[1].imshow(std_flag.T, aspect="auto", interpolation="none", cmap="grey_r", origin="lower")
+            axes[2].set_title("Combined flag")
+            axes[2].imshow(self.combined_flag.T, aspect="auto", interpolation="none", cmap="grey_r", origin="lower")
+            axes[2].set_xlabel("Pointing")
+            for ax in axes:
+                ax.set_ylabel("Energy bin")
+
+        flagged_per_energy = np.sum(self.combined_flag, axis=0)
+        print("Number of removed pointing for each energy bin")
+        print(flagged_per_energy)
+        print("Proportion of removed pointing for each energy bin in percent")
+        print(100 * flagged_per_energy / self.Npoint)
+
+        return {
+            "detector_outlier_count": detector_outlier_count,
+            "detector_std": detector_std,
+            "detector_outlier_flag": detector_outlier_flag,
+            "std_flag": std_flag,
+            "combined_flag": self.combined_flag,
+        }
+
+
+
+    def plot_chi_per_point_per_det(self, energy_bins=None, n_sigma=3, ncols=1, figsize=(8, 5),
+                                   show_det=False, use_same_y_lim=False, show_hist=False, n_hist_bins=30,
+                                   show_point_select=False):
+        """Plot chi by energy bin, optionally showing a separate series per detector."""
+
+        chi_values = self.delta_chi
+        if show_point_select:
+            if not hasattr(self, "combined_flag"):
+                raise ValueError("Run select_pointing() before plotting selected pointings.")
+            if self.combined_flag.shape != (chi_values.shape[0], chi_values.shape[2]):
+                raise ValueError("combined_flag shape does not match delta_chi pointings and energy bins.")
+
         if energy_bins is None:
             energy_bins = range(chi_values.shape[2])
         else:
@@ -374,7 +455,6 @@ class SPIResult:
         finite_chi = finite_chi[np.isfinite(finite_chi)]
         global_y_lim = max(float(finite_chi.max()) if finite_chi.size else 0, n_sigma) * 1.05
 
-        Nparam= self.res_header['PARS_FIT']
         for ax, energy_bin in zip(axes, energy_bins):
             e_min = self.ener_df.loc[energy_bin, "E_MIN"]
             e_max = self.ener_df.loc[energy_bin, "E_MAX"]
@@ -384,7 +464,7 @@ class SPIResult:
                 finite_flat_chi = flat_chi[np.isfinite(flat_chi)]
                 hist_ax = make_axes_locatable(ax).append_axes("right", size="30%", pad=0.) # pad=0.08
                 histogram, bin_edges, _ = hist_ax.hist(
-                    finite_flat_chi, orientation="horizontal", alpha=0.7, label="Residuals", bins=n_hist_bins,
+                    finite_flat_chi, orientation="horizontal", alpha=0.5, label="Residuals", bins=n_hist_bins,
                 )
                 bin_width = np.diff(bin_edges).mean()
                 gaussian_y = np.linspace(bin_edges[0], bin_edges[-1], 200)
@@ -398,26 +478,58 @@ class SPIResult:
                 hist_ax.set_yticks([])
                 hist_ax.legend(loc="best")
 
-            # recompute chi2 and reduced chi2
-            Ndata = (~np.isnan(flat_chi)).sum()
-            Ndof = Ndata - Nparam
-            chi2 = np.nansum(self.chi[:,:,energy_bin].flatten()**2)
-            chi2_red = chi2/Ndof
-
             ax.set_title(f"{e_min:g}-{e_max:g} keV (bin {energy_bin})")
-            label_plt= rf"$\mu$= {np.nanmean(flat_chi):.2e}, ($\sigma$ - 1)={np.nanstd(flat_chi)-1:.2e}"+"\n"
-            label_plt += rf"$\chi^2_r$= {chi2_red:.2f} ({Ndof} dof)"
+            label_plt= rf"$\mu$= {np.nanmean(flat_chi):.1e}, $\sigma$= {np.nanstd(flat_chi):.2f}"+"\n"
+            if show_point_select:
+                point_selected = self.combined_flag[:, energy_bin]
+                good_chi = chi_values[:, :, energy_bin][~point_selected].ravel()
+                good_chi = good_chi[np.isfinite(good_chi)]
+                good_mean = np.mean(good_chi) if good_chi.size else np.nan
+                good_std = np.std(good_chi) if good_chi.size else np.nan
+                label_good = rf"$\mu$= {good_mean:.1e}, $\sigma$= {good_std:.2f}"+"\n"
+            # label_plt += rf"$\chi^2_r$= {chi2_red:.2f} ({Ndof} dof)"
+            
             if show_det:
+                labels_added = False
                 for detector in range(self.Ndetectors):
-                    if np.isnan(chi_values[:, detector, :]).all():
+                    detector_chi = chi_values[:, detector, energy_bin]
+                    if not np.isfinite(detector_chi).any():
                         continue
-                    ax.plot(
-                        chi_values[:, detector, energy_bin], ".",
-                    )
+                    if show_point_select:
+                        point_selected = self.combined_flag[:, energy_bin]
+                        finite = np.isfinite(detector_chi)
+                        ax.scatter(
+                            np.flatnonzero(finite & point_selected), detector_chi[finite & point_selected],
+                            color="red", s=8, alpha=0.4,
+                            label=f"bad pointing\n{label_plt}" if not labels_added else None,
+                        )
+                        ax.scatter(
+                            np.flatnonzero(finite & ~point_selected), detector_chi[finite & ~point_selected],
+                            color="blue", s=8, alpha=0.4,
+                            label=f"good pointing\n{label_good}" if not labels_added else None,
+                        )
+                        labels_added = True
+                    else:
+                        ax.plot(detector_chi, ".")
+                if show_point_select:
+                    ax.plot([], [], linestyle="none") # , label=label_plt
             else:
-                ax.plot(
-                    flat_chi, ".", label=label_plt,
-                )
+                if show_point_select:
+                    point_selected = np.repeat(self.combined_flag[:, energy_bin], chi_values.shape[1])
+                    finite = np.isfinite(flat_chi)
+                    ax.scatter(
+                        np.flatnonzero(finite & point_selected), flat_chi[finite & point_selected],
+                        color="red", s=8, alpha=0.4, label="bad pointing",
+                    )
+                    ax.scatter(
+                        np.flatnonzero(finite & ~point_selected), flat_chi[finite & ~point_selected],
+                        color="blue", s=8, alpha=0.4, label="good pointing",
+                    )
+                    ax.plot([], [], linestyle="none", label=label_plt)
+                else:
+                    ax.plot(
+                        flat_chi, ".", label=label_plt,
+                    )
             ax.axhline(n_sigma, color="red", linestyle="--", label=f"{n_sigma:g}-"+r"$\sigma$") 
             ax.axhline(-n_sigma, color="red", linestyle="--")
             ax.axhline(0., color="black", linestyle=":")
@@ -426,7 +538,7 @@ class SPIResult:
                 if show_side_histogram:
                     hist_ax.set_ylim(-global_y_lim, global_y_lim)
 
-            ax.set_xlabel("Index (point * Ndet + det)")
+            ax.set_xlabel("Pointing" if show_det else "Index (point * Ndet + det)")
             ax.set_ylabel(r"$\Delta \chi$")
             ax.grid(alpha=0.3)
             ax.legend(loc="best")

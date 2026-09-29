@@ -47,9 +47,17 @@ run run_spitap --obsdir <path_to_analysis>
 ```
 and let the prompts guide you.
 
+# Result analysis
+
+<!-- Some functionalities such as diffuse emission are purposfully not implemented in order to avoid becoming a [Rube-Goldberg-machine](https://en.wikipedia.org/wiki/Rube_Goldberg_machine). -->
+
 For automatized runs, use the auto_spitab.ipynb notebook, where all the run parameters can be stored in a dictionary.
 
-Some functionalities such as diffuse emission are purposfully not implemented in order to avoid becoming a [Rube-Goldberg-machine](https://en.wikipedia.org/wiki/Rube_Goldberg_machine).
+The notebook also contains examples to use the analyze_res.py module, which allows to plot
+- Residuals over pointing and detectors for different energy bins. This allows to check the fit and remove bad pointings.
+- Light-curves of all sources for a given energy bin
+- Light-curves of any energy for a given source
+
 
 <!-- # Full install (WIP)
 
@@ -93,3 +101,5 @@ For a more detailed analysis, fit_spectra_3ML.ipynb contains an exemple of spect
 unsetenv HEADAS PFILES LHEASOFT
 pip install astromodels threeml
 ```
+
+this might not install the XSpec models though (to check).
