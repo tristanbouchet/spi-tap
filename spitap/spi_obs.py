@@ -14,7 +14,9 @@ Main analysis steps:
 - run spimodfit and generate spectral response
 
 TO DO:
-method to import run parameters (dates, energies, etc...) from txt file
+- convolve with spimodfit but fit with python
+- lower verbosity
+- method to import run parameters (dates, energies, etc...) from txt file
 """
 
 print('Loading spi_obs module...\n')
@@ -548,6 +550,18 @@ class ObsSPI:
         self.select_observations(date_start, date_end, off_angle)
 
     
+    ########## Select event type ##########
+
+    def select_data_dir(self, evt_type):
+        if evt_type== 'SE':
+            self.data_dir= self.data_dir_se
+        elif evt_type== 'PSD':
+            self.data_dir= self.data_dir_psd
+        elif evt_type== 'HE':
+            self.data_dir= self.data_dir_he
+        else:
+            print(f'Event type {evt_type} not recognized!')
+
     ########## Select energies ##########
 
     def write_energies_txt(self):
@@ -608,7 +622,8 @@ class ObsSPI:
             self.Nchan = len(self.e_channels) - 1
             
             self.ener_dir = f'{self.e_channels[0]:.0f}_{self.e_channels[-1]:.0f}_{self.Nchan}{self.binning_type}_{self.evt_type}'
-        
+
+        self.select_data_dir(self.evt_type)
         print(f'Energy range: {self.e_channels[0]:.1f} - {self.e_channels[-1]:.1f} keV')
         print('Energy bins:', self.e_channels)
     

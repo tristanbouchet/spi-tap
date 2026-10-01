@@ -26,9 +26,12 @@ class SPIResult:
     def __init__(self, fit_path, result_file="results.spimodfit.fits", residuals_file="residuals.fits", uplim_proba=.9):
         self.uplim_proba = uplim_proba
         self.fit_path = fit_path
+        self.p_point_thresh= None
+        self.single_det_thresh= None
         # result file with count-rates
         self.result_file = result_file
         self.result_path = f"{fit_path}/{result_file}"
+        print(f'Loading results from {fit_path}')
         self.hdul_result = fits.open(self.result_path)
 
         self.ener_df = Table(self.hdul_result["SPI.-EBDS-SET"].data).to_pandas()
@@ -155,13 +158,21 @@ class SPIResult:
         # self.Nebin = residuals.shape[-1]
         self.residuals = residuals.reshape(self.Npoint, self.Ndetectors, self.Nebin)
         self.residual_errors = residual_errors.reshape(self.Npoint, self.Ndetectors, self.Nebin)
+        # delta_chi for each point, detector, energy
         self.delta_chi = np.divide(
             self.residuals,
             self.residual_errors,
             out=np.full_like(self.residuals, np.nan),
             where=self.residual_errors != 0,
         )
-        # self.delta_chi_per_point_energy = np.nansum(self.delta_chi, axis=1)
+
+        self.valid_detectors = np.isfinite(self.delta_chi)
+        self.valid_counts = np.sum(self.valid_detectors, axis=1) # how many alive detectors
+        # chi2 of the detectors for each pointing and energy
+        self.detector_chi2 = np.nansum(self.delta_chi**2, axis=1)
+        # p-value= proba of having chi2 value above detector_chi2 = right-side integral of chi2 distribution
+        self.detector_pvalue = stats.chi2.sf(self.detector_chi2, self.valid_counts)
+
         print(f'Shape of residual array {self.delta_chi.shape}')
 
     def _make_stat_df(self):
@@ -365,43 +376,31 @@ class SPIResult:
         return axes
 
     
-    
-    def select_pointing(self, det_thresh=7., std_point_thresh=3., plot_flags=False):
+    def select_pointing(self, single_det_thresh=7., p_point_thresh=0.01, plot_flags=False):
         """
-        Flag pointings with an extreme detector residual or detector spread for delta chi.
+        Flag pointings based on delta_chi of detectors
+        either from absolute value, or from p-value of all detectors
+        TO DO: add a high threshold for p-value (i.e. overfitted pointing)?
         """
-        chi_values = self.delta_chi
-        valid_detectors = np.isfinite(chi_values)
-        valid_counts = np.sum(valid_detectors, axis=1)
+        self.p_point_thresh= p_point_thresh
+        self.single_det_thresh= single_det_thresh
 
-        detector_outlier_mask = valid_detectors & (np.abs(chi_values) > det_thresh)
+        # flag 1: individual detector with delta_chi > det_thresh
+        detector_outlier_mask = self.valid_detectors & (np.abs(self.delta_chi) > single_det_thresh)
         detector_outlier_count = np.sum(detector_outlier_mask, axis=1)
-        detector_outlier_flag = detector_outlier_count > 0
+        self.single_det_flag = detector_outlier_count > 0
 
-        safe_chi = np.where(valid_detectors, chi_values, 0.0)
-        detector_mean = np.divide(
-            np.sum(safe_chi, axis=1),
-            valid_counts,
-            out=np.full(valid_counts.shape, np.nan, dtype=float),
-            where=valid_counts > 0,
-        )
-        centered_chi = np.where(valid_detectors, safe_chi - detector_mean[:, None, :], 0.0)
-        detector_std = np.sqrt(
-            np.divide(
-                np.sum(centered_chi**2, axis=1),
-                valid_counts,
-                out=np.full(valid_counts.shape, np.nan, dtype=float),
-                where=valid_counts > 0,
-            )
-        )
-        std_flag = (valid_counts > 0) & (detector_std > std_point_thresh)
-        self.combined_flag = detector_outlier_flag | std_flag
+        # flag 2: pointing per energy where chi2 p-value of detectors below threshold
+        self.chi2_flag = self.detector_pvalue < p_point_thresh
+        # combine flag with or statement
+        self.combined_flag = self.single_det_flag | self.chi2_flag
+
         if plot_flags:
             fig, axes = plt.subplots(3, 1, figsize=(10, 9))
-            axes[0].set_title(f"Number of abs(det chi) > {det_thresh}")
+            axes[0].set_title(f"Number of abs(det chi) > {single_det_thresh}")
             axes[0].imshow(detector_outlier_count.T, aspect="auto", interpolation="none", origin="lower")
-            axes[1].set_title(f"Flag of det chi std > {std_point_thresh}")
-            axes[1].imshow(std_flag.T, aspect="auto", interpolation="none", cmap="grey_r", origin="lower")
+            axes[1].set_title(f"Flag of chi2 p-value < {p_point_thresh}")
+            axes[1].imshow(self.chi2_flag.T, aspect="auto", interpolation="none", cmap="grey_r", origin="lower")
             axes[2].set_title("Combined flag")
             axes[2].imshow(self.combined_flag.T, aspect="auto", interpolation="none", cmap="grey_r", origin="lower")
             axes[2].set_xlabel("Pointing")
@@ -416,11 +415,64 @@ class SPIResult:
 
         return {
             "detector_outlier_count": detector_outlier_count,
-            "detector_std": detector_std,
-            "detector_outlier_flag": detector_outlier_flag,
-            "std_flag": std_flag,
+            "detector_std": self.single_det_flag,
+            "detector_chi2_flag": self.chi2_flag,
             "combined_flag": self.combined_flag,
         }
+
+    def plot_detector_pvalue(self, energy_bins=None, ncols=1, figsize=(8, 3), yscale="linear", show_percent=True):
+        """Plot detector_pvalue vs pointing, one panel per energy bin."""
+        if energy_bins is None:
+            energy_bins = range(self.Nebin)
+        else:
+            energy_bins = list(energy_bins)
+
+        ncols = min(ncols, len(energy_bins))
+        nrows = math.ceil(len(energy_bins) / ncols)
+        fig, axes = plt.subplots(
+            nrows, ncols,
+            figsize=(figsize[0] * ncols, figsize[1] * nrows),
+            squeeze=False,
+        )
+        axes = axes.ravel()
+
+        has_flags = hasattr(self, "chi2_flag")
+
+        unit_factor = 100 if show_percent else 1
+
+        for ax, energy_bin in zip(axes, energy_bins):
+            e_min = self.ener_df.loc[energy_bin, "E_MIN"]
+            e_max = self.ener_df.loc[energy_bin, "E_MAX"]
+            pvalue = self.detector_pvalue[:, energy_bin] * unit_factor
+            points = np.arange(self.Npoint)
+
+            if has_flags:
+                flagged = self.chi2_flag[:, energy_bin]
+                frac_flagged = 100 * np.sum(flagged) / self.Npoint
+                ax.plot(points[~flagged], pvalue[~flagged], ".", color="black")
+                ax.plot(points[flagged], pvalue[flagged], ".", color="red",
+                        label=f"flagged ({frac_flagged:.1f}%)")
+            else:
+                ax.plot(points, pvalue, ".", color="black")
+
+            if self.p_point_thresh is not None:
+                thresh = self.p_point_thresh * unit_factor
+                ax.axhline(thresh, color="grey", linestyle=":", label=f"thresh= {thresh:g}{'%' if show_percent else ''}")
+
+            if yscale == "log":
+                ax.set_yscale("log")
+
+            ax.set_title(f"{e_min:g}-{e_max:g} keV (bin {energy_bin})")
+            ax.set_xlabel("Pointing")
+            ax.set_ylabel("detector_pvalue (%)" if show_percent else "detector_pvalue")
+            ax.grid(alpha=0.3)
+            ax.legend(loc="best")
+
+        for ax in axes[len(energy_bins):]:
+            ax.set_visible(False)
+
+        fig.tight_layout()
+        return axes
 
 
 

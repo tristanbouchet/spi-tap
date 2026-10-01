@@ -33,7 +33,8 @@ spec_dico = {'RATE':[r'Count s$^{-1}$ keV$^{-1}$',1,0],
              'ERG':[r'erg cm$^{-2}$ s$^{-1}$',kev_to_erg,2]
              }
 res_dico = {'RES':[0,r'$\sigma$'],
-            'REDCHI2':[1,r'$\chi^2_{red}$']}
+            'REDCHI2':[1,r'$\chi^2_{red}$']
+            }
 
 ############### Timing testing ###############
 

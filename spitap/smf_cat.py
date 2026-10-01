@@ -13,10 +13,9 @@ from astropy.io import fits
 
 DEFAULT_VAR_SRC_DICO = {
     ('pointings', 1):
-    [
-    'A0535+32', 'Vela X-1', 'GX 301-2', '4U 1700-377', 'Sco X-1', 'Aql X-1', 'GRS 1915+105',
-    'Cyg X-1', 'Cyg X-3', 'SWIFT J1753.5-0127', 'IGR J17464-3213', 'V0332+53',
-    ],
+    ['A0535+32', 'Vela X-1', 'GX 301-2', '4U 1700-377', 'Sco X-1', 'Aql X-1', 'GRS 1915+105',
+    'Cyg X-1', 'Cyg X-3', 'SWIFT J1753.5-0127', 'IGR J17464-3213', 'V0332+53'],
+    
     ('days', 1): [],
 }
 
